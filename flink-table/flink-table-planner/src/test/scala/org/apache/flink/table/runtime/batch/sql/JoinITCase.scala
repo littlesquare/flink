@@ -18,8 +18,12 @@
 
 package org.apache.flink.table.runtime.batch.sql
 
+import java.util
+
+import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.scala._
 import org.apache.flink.api.scala.util.CollectionDataSets
+import org.apache.flink.table.api.Types
 import org.apache.flink.table.api.scala._
 import org.apache.flink.table.runtime.utils.TableProgramsCollectionTestBase
 import org.apache.flink.table.runtime.utils.TableProgramsTestBase.TableConfigMode
@@ -148,8 +152,8 @@ class JoinITCase(
 
     val ds1 = CollectionDataSets.getSmall3TupleDataSet(env)
     val ds2 = CollectionDataSets.get5TupleDataSet(env)
-    tEnv.registerDataSet("Table3", ds1, 'a, 'b, 'c)
-    tEnv.registerDataSet("Table5", ds2, 'd, 'e, 'f, 'g, 'h)
+    tEnv.createTemporaryView("Table3", ds1, 'a, 'b, 'c)
+    tEnv.createTemporaryView("Table5", ds2, 'd, 'e, 'f, 'g, 'h)
 
     val result = tEnv.sqlQuery(sqlQuery)
 
@@ -478,7 +482,7 @@ class JoinITCase(
       (3, 2L, Array("Hello world", "x"))
     )
     val stream = env.fromCollection(data)
-    tEnv.registerDataSet("T", stream, 'a, 'b, 'c)
+    tEnv.createTemporaryView("T", stream, 'a, 'b, 'c)
 
     val sqlQuery = "SELECT a, s FROM T, UNNEST(T.c) as A (s)"
 
@@ -486,6 +490,56 @@ class JoinITCase(
 
     val expected = List("1,Hi", "1,w", "2,Hello", "2,k", "3,Hello world", "3,x")
     val results = result.toDataSet[Row].collect().toList
+    assertEquals(expected.toString(), results.sortWith(_.toString < _.toString).toString())
+  }
+
+  @Test
+  def testCrossWithUnnestForMap(): Unit = {
+    val env = ExecutionEnvironment.getExecutionEnvironment
+    val tEnv = BatchTableEnvironment.create(env, config)
+
+    val data = List(
+      Row.of(Int.box(1),
+        Long.box(11L), {
+          val map = new util.HashMap[String, String]()
+          map.put("a", "10")
+          map.put("b", "11")
+          map
+        }),
+      Row.of(Int.box(2),
+        Long.box(22L), {
+          val map = new util.HashMap[String, String]()
+          map.put("c", "20")
+          map
+        }),
+      Row.of(Int.box(3),
+        Long.box(33L), {
+          val map = new util.HashMap[String, String]()
+          map.put("d", "30")
+          map.put("e", "31")
+          map
+        })
+    )
+
+    implicit val typeInfo = Types.ROW(
+      Array[String]("a", "b", "c"),
+      Array[TypeInformation[_]](Types.INT,
+        Types.LONG,
+        Types.MAP(Types.STRING, Types.STRING))
+    )
+    val table = tEnv.fromDataSet(env.fromCollection(data))
+    tEnv.registerTable("src", table)
+
+
+    val sqlQuery =
+      """
+        |SELECT a,b,v FROM src
+        |CROSS JOIN UNNEST(c) as f (k,v)
+      """.stripMargin
+    val result = tEnv.sqlQuery(sqlQuery)
+
+    val expected = List("1,11,10", "1,11,11", "2,22,20", "3,33,30", "3,33,31")
+    val results = result.collect().toList
     assertEquals(expected.toString(), results.sortWith(_.toString < _.toString).toString())
   }
 
@@ -500,7 +554,7 @@ class JoinITCase(
       (3, Array((18, "42.6")))
     )
     val stream = env.fromCollection(data)
-    tEnv.registerDataSet("T", stream, 'a, 'b)
+    tEnv.createTemporaryView("T", stream, 'a, 'b)
 
     val sqlQuery = "" +
       "SELECT a, b, x, y " +

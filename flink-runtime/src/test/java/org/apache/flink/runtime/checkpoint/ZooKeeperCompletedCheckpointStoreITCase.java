@@ -18,8 +18,8 @@
 
 package org.apache.flink.runtime.checkpoint;
 
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.runtime.concurrent.Executors;
-import org.apache.flink.runtime.jobgraph.JobStatus;
 import org.apache.flink.runtime.state.RetrievableStateHandle;
 import org.apache.flink.runtime.state.SharedStateRegistry;
 import org.apache.flink.runtime.util.ZooKeeperUtils;
@@ -27,8 +27,9 @@ import org.apache.flink.runtime.zookeeper.RetrievableStateStorageHelper;
 import org.apache.flink.runtime.zookeeper.ZooKeeperStateHandleStore;
 import org.apache.flink.runtime.zookeeper.ZooKeeperTestEnvironment;
 
-import org.apache.curator.framework.CuratorFramework;
-import org.apache.zookeeper.data.Stat;
+import org.apache.flink.shaded.curator4.org.apache.curator.framework.CuratorFramework;
+import org.apache.flink.shaded.zookeeper3.org.apache.zookeeper.data.Stat;
+
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.Test;
@@ -119,7 +120,7 @@ public class ZooKeeperCompletedCheckpointStoreITCase extends CompletedCheckpoint
 
 		assertEquals(3, ZOOKEEPER.getClient().getChildren().forPath(CHECKPOINT_PATH).size());
 		assertEquals(3, checkpoints.getNumberOfRetainedCheckpoints());
-		assertEquals(expected[2], checkpoints.getLatestCheckpoint());
+		assertEquals(expected[2], checkpoints.getLatestCheckpoint(false));
 
 		List<CompletedCheckpoint> expectedCheckpoints = new ArrayList<>(3);
 		expectedCheckpoints.add(expected[1]);
@@ -193,7 +194,7 @@ public class ZooKeeperCompletedCheckpointStoreITCase extends CompletedCheckpoint
 		sharedStateRegistry.close();
 		store.recover();
 
-		CompletedCheckpoint recovered = store.getLatestCheckpoint();
+		CompletedCheckpoint recovered = store.getLatestCheckpoint(false);
 		assertEquals(checkpoint, recovered);
 	}
 
@@ -220,7 +221,7 @@ public class ZooKeeperCompletedCheckpointStoreITCase extends CompletedCheckpoint
 		sharedStateRegistry.close();
 		checkpointStore.recover();
 
-		CompletedCheckpoint latestCheckpoint = checkpointStore.getLatestCheckpoint();
+		CompletedCheckpoint latestCheckpoint = checkpointStore.getLatestCheckpoint(false);
 
 		assertEquals(checkpoints.get(checkpoints.size() -1), latestCheckpoint);
 	}
@@ -251,7 +252,7 @@ public class ZooKeeperCompletedCheckpointStoreITCase extends CompletedCheckpoint
 		sharedStateRegistry = new SharedStateRegistry();
 		zkCheckpointStore2.recover();
 
-		CompletedCheckpoint recoveredCheckpoint = zkCheckpointStore2.getLatestCheckpoint();
+		CompletedCheckpoint recoveredCheckpoint = zkCheckpointStore2.getLatestCheckpoint(false);
 		assertTrue(recoveredCheckpoint instanceof TestCompletedCheckpoint);
 		TestCompletedCheckpoint recoveredTestCheckpoint = (TestCompletedCheckpoint) recoveredCheckpoint;
 

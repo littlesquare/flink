@@ -19,14 +19,18 @@ package org.apache.flink.streaming.connectors.kafka;
 
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.api.common.ExecutionConfig;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.state.OperatorStateStore;
-import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.base.LongSerializer;
 import org.apache.flink.api.java.ClosureCleaner;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
+import org.apache.flink.api.java.typeutils.runtime.TupleSerializer;
+import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.MetricGroup;
@@ -278,7 +282,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 	 * the streams from the partitions are unioned in a "first come first serve" fashion. Per-partition
 	 * characteristics are usually lost that way. For example, if the timestamps are strictly ascending
 	 * per Kafka partition, they will not be strictly ascending in the resulting Flink DataStream, if the
-	 * parallel source subtask reads more that one partition.
+	 * parallel source subtask reads more than one partition.
 	 *
 	 * <p>Running timestamp extractors / watermark generators directly inside the Kafka source, per Kafka
 	 * partition, allows users to let them exploit the per-partition characteristics.
@@ -296,7 +300,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 			throw new IllegalStateException("A periodic watermark emitter has already been set.");
 		}
 		try {
-			ClosureCleaner.clean(assigner, true);
+			ClosureCleaner.clean(assigner, ExecutionConfig.ClosureCleanerLevel.RECURSIVE, true);
 			this.punctuatedWatermarkAssigner = new SerializedValue<>(assigner);
 			return this;
 		} catch (Exception e) {
@@ -331,7 +335,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 			throw new IllegalStateException("A punctuated watermark emitter has already been set.");
 		}
 		try {
-			ClosureCleaner.clean(assigner, true);
+			ClosureCleaner.clean(assigner, ExecutionConfig.ClosureCleanerLevel.RECURSIVE, true);
 			this.periodicWatermarkAssigner = new SerializedValue<>(assigner);
 			return this;
 		} catch (Exception e) {
@@ -662,6 +666,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 		// initialize commit metrics and default offset callback method
 		this.successfulCommits = this.getRuntimeContext().getMetricGroup().counter(COMMITS_SUCCEEDED_METRICS_COUNTER);
 		this.failedCommits =  this.getRuntimeContext().getMetricGroup().counter(COMMITS_FAILED_METRICS_COUNTER);
+		final int subtaskIndex = this.getRuntimeContext().getIndexOfThisSubtask();
 
 		this.offsetCommitCallback = new KafkaCommitCallback() {
 			@Override
@@ -671,7 +676,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 
 			@Override
 			public void onException(Throwable cause) {
-				LOG.warn("Async Kafka commit failed.", cause);
+				LOG.warn(String.format("Consumer subtask %d failed async Kafka commit.", subtaskIndex), cause);
 				failedCommits.inc();
 			}
 		};
@@ -683,6 +688,8 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 			sourceContext.markAsTemporarilyIdle();
 		}
 
+		LOG.info("Consumer subtask {} creating fetcher with offsets {}.",
+			getRuntimeContext().getIndexOfThisSubtask(), subscribedPartitionsToStartOffsets);
 		// from this point forward:
 		//   - 'snapshotState' will draw offsets from the fetcher,
 		//     instead of being built from `subscribedPartitionsToStartOffsets`
@@ -853,9 +860,8 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 		ListState<Tuple2<KafkaTopicPartition, Long>> oldRoundRobinListState =
 			stateStore.getSerializableListState(DefaultOperatorStateBackend.DEFAULT_OPERATOR_STATE_NAME);
 
-		this.unionOffsetStates = stateStore.getUnionListState(new ListStateDescriptor<>(
-				OFFSETS_STATE_NAME,
-				TypeInformation.of(new TypeHint<Tuple2<KafkaTopicPartition, Long>>() {})));
+		this.unionOffsetStates = stateStore.getUnionListState(new ListStateDescriptor<>(OFFSETS_STATE_NAME,
+			createStateSerializer(getRuntimeContext().getExecutionConfig())));
 
 		if (context.isRestored() && !restoredFromOldState) {
 			restoredState = new TreeMap<>(new KafkaTopicPartition.Comparator());
@@ -877,9 +883,9 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 				restoredState.put(kafkaOffset.f0, kafkaOffset.f1);
 			}
 
-			LOG.info("Setting restore state in the FlinkKafkaConsumer: {}", restoredState);
+			LOG.info("Consumer subtask {} restored state: {}.", getRuntimeContext().getIndexOfThisSubtask(), restoredState);
 		} else {
-			LOG.info("No restore state for FlinkKafkaConsumer.");
+			LOG.info("Consumer subtask {} has no restore state.", getRuntimeContext().getIndexOfThisSubtask());
 		}
 	}
 
@@ -943,13 +949,15 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 		if (offsetCommitMode == OffsetCommitMode.ON_CHECKPOINTS) {
 			// only one commit operation must be in progress
 			if (LOG.isDebugEnabled()) {
-				LOG.debug("Committing offsets to Kafka/ZooKeeper for checkpoint " + checkpointId);
+				LOG.debug("Consumer subtask {} committing offsets to Kafka/ZooKeeper for checkpoint {}.",
+					getRuntimeContext().getIndexOfThisSubtask(), checkpointId);
 			}
 
 			try {
 				final int posInMap = pendingOffsetsToCommit.indexOf(checkpointId);
 				if (posInMap == -1) {
-					LOG.warn("Received confirmation for unknown checkpoint id {}", checkpointId);
+					LOG.warn("Consumer subtask {} received confirmation for unknown checkpoint id {}",
+						getRuntimeContext().getIndexOfThisSubtask(), checkpointId);
 					return;
 				}
 
@@ -963,7 +971,7 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 				}
 
 				if (offsets == null || offsets.size() == 0) {
-					LOG.debug("Checkpoint state was empty.");
+					LOG.debug("Consumer subtask {} has empty checkpoint state.", getRuntimeContext().getIndexOfThisSubtask());
 					return;
 				}
 
@@ -1056,5 +1064,22 @@ public abstract class FlinkKafkaConsumerBase<T> extends RichParallelSourceFuncti
 	@VisibleForTesting
 	LinkedMap getPendingOffsetsToCommit() {
 		return pendingOffsetsToCommit;
+	}
+
+	/**
+	 * Creates state serializer for kafka topic partition to offset tuple.
+	 * Using of the explicit state serializer with KryoSerializer is needed because otherwise
+	 * users cannot use 'disableGenericTypes' properties with KafkaConsumer.
+	 */
+	@VisibleForTesting
+	static TupleSerializer<Tuple2<KafkaTopicPartition, Long>> createStateSerializer(ExecutionConfig executionConfig) {
+		// explicit serializer will keep the compatibility with GenericTypeInformation and allow to disableGenericTypes for users
+		TypeSerializer<?>[] fieldSerializers = new TypeSerializer<?>[]{
+			new KryoSerializer<>(KafkaTopicPartition.class, executionConfig),
+			LongSerializer.INSTANCE
+		};
+		@SuppressWarnings("unchecked")
+		Class<Tuple2<KafkaTopicPartition, Long>> tupleClass = (Class<Tuple2<KafkaTopicPartition, Long>>) (Class<?>) Tuple2.class;
+		return new TupleSerializer<>(tupleClass, fieldSerializers);
 	}
 }

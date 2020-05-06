@@ -18,16 +18,16 @@
 package org.apache.flink.table.runtime.stream.table
 
 import java.lang.{Boolean => JBoolean}
-
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.scala.{DataStream, StreamExecutionEnvironment}
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{Types, ValidationException}
+import org.apache.flink.table.api.{EnvironmentSettings, Types, ValidationException}
 import org.apache.flink.table.expressions.utils.{Func18, Func20, RichFunc2}
 import org.apache.flink.table.runtime.utils.{StreamITCase, StreamTestData, _}
 import org.apache.flink.table.utils._
 import org.apache.flink.test.util.AbstractTestBase
 import org.apache.flink.types.Row
+
 import org.junit.Assert._
 import org.junit.{Before, Test}
 
@@ -36,7 +36,8 @@ import scala.collection.mutable
 class CorrelateITCase extends AbstractTestBase {
 
   val env: StreamExecutionEnvironment = StreamExecutionEnvironment.getExecutionEnvironment
-  val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env)
+  val settings: EnvironmentSettings = EnvironmentSettings.newInstance().useOldPlanner().build()
+  val tEnv: StreamTableEnvironment = StreamTableEnvironment.create(env, settings)
 
   @Before
   def clear(): Unit = {
@@ -303,6 +304,32 @@ class CorrelateITCase extends AbstractTestBase {
       Seq(),
       StreamITCase.testResults.sorted
     )
+  }
+
+  @Test
+  def testFlatMap(): Unit = {
+    val func2 = new TableFunc2
+    val ds = testData(env).toTable(tEnv, 'a, 'b, 'c)
+      // test non alias
+      .flatMap(func2('c))
+      .select('f0, 'f1)
+      // test the output field name of flatMap is the same as the field name of the input table
+      .flatMap(func2(concat('f0, "#")))
+      .as ('f0, 'f1)
+      .select('f0, 'f1)
+
+    val results = ds.toAppendStream[Row]
+    results.addSink(new StreamITCase.StringSink[Row])
+    env.execute()
+
+    val expected = mutable.MutableList(
+      "Jack,4",
+      "22,2",
+      "John,4",
+      "19,2",
+      "Anna,4",
+      "44,2")
+    assertEquals(expected.sorted, StreamITCase.testResults.sorted)
   }
 
   private def testData(

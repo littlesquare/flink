@@ -35,7 +35,7 @@ class InsertIntoValidationTest extends TableTestBase {
     val fieldNames = Array("d", "e")
     val fieldTypes: Array[TypeInformation[_]] = Array(Types.INT, Types.LONG)
     val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
-    util.tableEnv.registerTableSink("targetTable", fieldNames, fieldTypes, sink)
+    util.tableEnv.registerTableSink("targetTable", sink.configure(fieldNames, fieldTypes))
 
     val sql = "INSERT INTO targetTable SELECT a, b, c FROM sourceTable"
 
@@ -51,7 +51,7 @@ class InsertIntoValidationTest extends TableTestBase {
     val fieldNames = Array("d", "e", "f")
     val fieldTypes: Array[TypeInformation[_]] = Array(Types.STRING, Types.INT, Types.LONG)
     val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
-    util.tableEnv.registerTableSink("targetTable", fieldNames, fieldTypes, sink)
+    util.tableEnv.registerTableSink("targetTable", sink.configure(fieldNames, fieldTypes))
 
     val sql = "INSERT INTO targetTable SELECT a, b, c FROM sourceTable"
 
@@ -67,11 +67,30 @@ class InsertIntoValidationTest extends TableTestBase {
     val fieldNames = Array("d", "e", "f")
     val fieldTypes = util.tableEnv.scan("sourceTable").getSchema.getFieldTypes
     val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
-    util.tableEnv.registerTableSink("targetTable", fieldNames, fieldTypes, sink)
+    util.tableEnv.registerTableSink("targetTable", sink.configure(fieldNames, fieldTypes))
 
     val sql = "INSERT INTO targetTable (d, f) SELECT a, c FROM sourceTable"
 
     // must fail because partial insert is not supported yet.
-    util.tableEnv.sqlUpdate(sql, util.tableEnv.queryConfig)
+    util.tableEnv.sqlUpdate(sql)
+  }
+
+  @Test
+  def testValidationExceptionMessage(): Unit = {
+    expectedException.expect(classOf[ValidationException])
+    expectedException.expectMessage("TableSink schema:    [a: Integer, b: Row" +
+      "(f0: Integer, f1: Integer, f2: Integer)]")
+    val util = batchTestUtil()
+    util.addTable[(Int, Long, String)]("sourceTable", 'a, 'b, 'c)
+    val fieldNames = Array("a", "b")
+    val fieldTypes: Array[TypeInformation[_]] = Array(Types.INT, Types.ROW
+    (Types.INT, Types.INT, Types.INT))
+    val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
+    util.tableEnv.registerTableSink("targetTable", sink.configure(fieldNames,
+      fieldTypes))
+
+    val sql = "INSERT INTO targetTable SELECT a, b FROM sourceTable"
+
+    util.tableEnv.sqlUpdate(sql)
   }
 }

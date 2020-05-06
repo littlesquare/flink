@@ -21,12 +21,14 @@ package org.apache.flink.table.plan.rules
 import org.apache.calcite.rel.core.RelFactories
 import org.apache.calcite.rel.rules._
 import org.apache.calcite.tools.{RuleSet, RuleSets}
-import org.apache.flink.table.plan.nodes.logical
+import org.apache.flink.table.plan.nodes.logical._
 import org.apache.flink.table.plan.rules.common._
-import org.apache.flink.table.plan.rules.logical._
 import org.apache.flink.table.plan.rules.dataSet._
 import org.apache.flink.table.plan.rules.datastream._
-import org.apache.flink.table.plan.nodes.logical._
+import org.apache.flink.table.plan.rules.logical.{ExtendedAggregateExtractProjectRule, _}
+import org.apache.calcite.rel.logical.{LogicalJoin, LogicalProject}
+import org.apache.flink.table.plan.rules.batch.DataSetPythonCorrelateRule
+import org.apache.flink.table.plan.rules.stream.DataStreamPythonCorrelateRule
 
 object FlinkRuleSets {
 
@@ -43,8 +45,7 @@ object FlinkRuleSets {
     * can create new plan nodes.
     */
   val EXPAND_PLAN_RULES: RuleSet = RuleSets.ofList(
-    LogicalCorrelateToTemporalTableJoinRule.INSTANCE,
-    TableScanRule.INSTANCE)
+    LogicalCorrelateToTemporalTableJoinRule.INSTANCE)
 
   val POST_EXPAND_CLEAN_UP_RULES: RuleSet = RuleSets.ofList(
     EnumerableToLogicalTableScan.INSTANCE)
@@ -70,7 +71,11 @@ object FlinkRuleSets {
     FilterProjectTransposeRule.INSTANCE,
     // push a projection to the children of a join
     // push all expressions to handle the time indicator correctly
-    new ProjectJoinTransposeRule(PushProjector.ExprCondition.FALSE, RelFactories.LOGICAL_BUILDER),
+    new ProjectJoinTransposeRule(
+      classOf[LogicalProject],
+      classOf[LogicalJoin],
+      PushProjector.ExprCondition.FALSE,
+      RelFactories.LOGICAL_BUILDER),
     // merge projections
     ProjectMergeRule.INSTANCE,
     // remove identity project
@@ -139,19 +144,37 @@ object FlinkRuleSets {
     FlinkLogicalValues.CONVERTER,
     FlinkLogicalTableSourceScan.CONVERTER,
     FlinkLogicalTableFunctionScan.CONVERTER,
-    FlinkLogicalNativeTableScan.CONVERTER,
-    FlinkLogicalMatch.CONVERTER
+    FlinkLogicalMatch.CONVERTER,
+    FlinkLogicalTableAggregate.CONVERTER,
+    FlinkLogicalWindowTableAggregate.CONVERTER
+  )
+
+  /**
+    * RuleSet to do rewrite on FlinkLogicalRel
+    */
+  val LOGICAL_REWRITE_RULES: RuleSet = RuleSets.ofList(
+    // Rule that splits python ScalarFunctions from join conditions
+    SplitPythonConditionFromJoinRule.INSTANCE,
+    // Rule that splits python ScalarFunctions from
+    // java/scala ScalarFunctions in correlate conditions
+    SplitPythonConditionFromCorrelateRule.INSTANCE,
+    // Rule that transpose the conditions after the Python correlate node.
+    CalcPythonCorrelateTransposeRule.INSTANCE,
+    // Rule that splits java calls from python TableFunction
+    PythonCorrelateSplitRule.INSTANCE,
+    CalcMergeRule.INSTANCE,
+    PythonCalcSplitRule.SPLIT_CONDITION,
+    PythonCalcSplitRule.SPLIT_PROJECT,
+    PythonCalcSplitRule.SPLIT_PANDAS_IN_PROJECT,
+    PythonCalcSplitRule.EXPAND_PROJECT,
+    PythonCalcSplitRule.PUSH_CONDITION,
+    PythonCalcSplitRule.REWRITE_PROJECT
   )
 
   /**
     * RuleSet to normalize plans for batch / DataSet execution
     */
   val DATASET_NORM_RULES: RuleSet = RuleSets.ofList(
-    // simplify expressions rules
-    ReduceExpressionsRule.FILTER_INSTANCE,
-    ReduceExpressionsRule.PROJECT_INSTANCE,
-    ReduceExpressionsRule.CALC_INSTANCE,
-    ReduceExpressionsRule.JOIN_INSTANCE,
     ProjectToWindowRule.PROJECT,
 
     // Transform grouping sets
@@ -163,6 +186,13 @@ object FlinkRuleSets {
 
     // expand distinct aggregate to normal aggregate with groupby
     AggregateExpandDistinctAggregatesRule.JOIN,
+
+    ExtendedAggregateExtractProjectRule.INSTANCE,
+    // simplify expressions rules
+    ReduceExpressionsRule.FILTER_INSTANCE,
+    ReduceExpressionsRule.PROJECT_INSTANCE,
+    ReduceExpressionsRule.CALC_INSTANCE,
+    ReduceExpressionsRule.JOIN_INSTANCE,
 
     // merge a cascade of predicates to IN or NOT_IN
     ConvertToNotInOrInRule.IN_INSTANCE,
@@ -178,6 +208,7 @@ object FlinkRuleSets {
     DataSetAggregateRule.INSTANCE,
     DataSetDistinctRule.INSTANCE,
     DataSetCalcRule.INSTANCE,
+    DataSetPythonCalcRule.INSTANCE,
     DataSetJoinRule.INSTANCE,
     DataSetSingleRowJoinRule.INSTANCE,
     DataSetScanRule.INSTANCE,
@@ -187,6 +218,7 @@ object FlinkRuleSets {
     DataSetSortRule.INSTANCE,
     DataSetValuesRule.INSTANCE,
     DataSetCorrelateRule.INSTANCE,
+    DataSetPythonCorrelateRule.INSTANCE,
     BatchTableSourceScanRule.INSTANCE
   )
 
@@ -199,6 +231,7 @@ object FlinkRuleSets {
     WindowPropertiesRule.INSTANCE,
     WindowPropertiesHavingRule.INSTANCE,
 
+    ExtendedAggregateExtractProjectRule.INSTANCE,
     // simplify expressions rules
     ReduceExpressionsRule.FILTER_INSTANCE,
     ReduceExpressionsRule.PROJECT_INSTANCE,
@@ -228,7 +261,11 @@ object FlinkRuleSets {
     DataStreamJoinRule.INSTANCE,
     DataStreamTemporalTableJoinRule.INSTANCE,
     StreamTableSourceScanRule.INSTANCE,
-    DataStreamMatchRule.INSTANCE
+    DataStreamMatchRule.INSTANCE,
+    DataStreamTableAggregateRule.INSTANCE,
+    DataStreamGroupWindowTableAggregateRule.INSTANCE,
+    DataStreamPythonCalcRule.INSTANCE,
+    DataStreamPythonCorrelateRule.INSTANCE
   )
 
   /**

@@ -32,6 +32,7 @@ import org.apache.flink.runtime.rest.handler.router.RouterHandler;
 import org.apache.flink.runtime.rest.versioning.RestAPIVersion;
 import org.apache.flink.runtime.util.ExecutorThreadFactory;
 import org.apache.flink.util.AutoCloseableAsync;
+import org.apache.flink.util.FlinkRuntimeException;
 import org.apache.flink.util.NetUtils;
 import org.apache.flink.util.Preconditions;
 
@@ -63,9 +64,11 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -107,7 +110,7 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 		this.sslHandlerFactory = configuration.getSslHandlerFactory();
 
 		this.uploadDir = configuration.getUploadDir();
-		createUploadDir(uploadDir, log);
+		createUploadDir(uploadDir, log, true);
 
 		this.maxContentLength = configuration.getMaxContentLength();
 		this.responseHeaders = configuration.getResponseHeaders();
@@ -137,6 +140,7 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 
 			final Router router = new Router();
 			final CompletableFuture<String> restAddressFuture = new CompletableFuture<>();
+			final Set<ChannelInboundHandler> distinctHandlers = Collections.newSetFromMap(new IdentityHashMap<>());
 
 			handlers = initializeHandlers(restAddressFuture);
 
@@ -152,7 +156,12 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 				RestHandlerUrlComparator.INSTANCE);
 
 			handlers.forEach(handler -> {
+				if (distinctHandlers.contains(handler.f1)) {
+					throw new FlinkRuntimeException("Duplicate REST handler instance found."
+						+ " Please ensure each instance is registered only once.");
+				}
 				registerHandler(router, handler, log);
+				distinctHandlers.add(handler.f1);
 			});
 
 			ChannelInitializer<SocketChannel> initializer = new ChannelInitializer<SocketChannel>() {
@@ -448,10 +457,14 @@ public abstract class RestServerEndpoint implements AutoCloseableAsync {
 	 * Creates the upload dir if needed.
 	 */
 	@VisibleForTesting
-	static void createUploadDir(final Path uploadDir, final Logger log) throws IOException {
+	static void createUploadDir(final Path uploadDir, final Logger log, final boolean initialCreation) throws IOException {
 		if (!Files.exists(uploadDir)) {
-			log.warn("Upload directory {} does not exist, or has been deleted externally. " +
-				"Previously uploaded files are no longer available.", uploadDir);
+			if (initialCreation) {
+				log.info("Upload directory {} does not exist. ", uploadDir);
+			} else {
+				log.warn("Upload directory {} has been deleted externally. " +
+					"Previously uploaded files are no longer available.", uploadDir);
+			}
 			checkAndCreateUploadDir(uploadDir, log);
 		}
 	}

@@ -21,9 +21,10 @@ package org.apache.flink.table.api.stream.table.validation
 import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{Types, ValidationException}
+import org.apache.flink.table.api.{EnvironmentSettings, Types, ValidationException}
 import org.apache.flink.table.runtime.utils.StreamTestData
 import org.apache.flink.table.utils.MemoryTableSourceSinkUtil
+
 import org.junit.Test
 
 class InsertIntoValidationTest {
@@ -31,7 +32,8 @@ class InsertIntoValidationTest {
   @Test(expected = classOf[ValidationException])
   def testInconsistentLengthInsert(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    val tEnv = StreamTableEnvironment.create(env)
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
     tEnv.registerTable("sourceTable", t)
@@ -39,18 +41,22 @@ class InsertIntoValidationTest {
     val fieldNames = Array("d", "f")
     val fieldTypes: Array[TypeInformation[_]] = Array(Types.INT, Types.LONG)
     val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
-    tEnv.registerTableSink("targetTable", fieldNames, fieldTypes, sink)
+    tEnv.registerTableSink("targetTable", sink.configure(fieldNames, fieldTypes))
 
     // must fail because table sink has too few fields.
     tEnv.scan("sourceTable")
       .select('a, 'b, 'c)
       .insertInto("targetTable")
+
+    // trigger translation
+    tEnv.execute("job name")
   }
 
   @Test(expected = classOf[ValidationException])
   def testUnmatchedTypesInsert(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
-    val tEnv = StreamTableEnvironment.create(env)
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val t = StreamTestData.getSmall3TupleDataStream(env).toTable(tEnv).as('a, 'b, 'c)
     tEnv.registerTable("sourceTable", t)
@@ -58,11 +64,14 @@ class InsertIntoValidationTest {
     val fieldNames = Array("d", "e", "f")
     val fieldTypes: Array[TypeInformation[_]] = Array(Types.STRING, Types.INT, Types.LONG)
     val sink = new MemoryTableSourceSinkUtil.UnsafeMemoryAppendTableSink
-    tEnv.registerTableSink("targetTable", fieldNames, fieldTypes, sink)
+    tEnv.registerTableSink("targetTable", sink.configure(fieldNames, fieldTypes))
 
     // must fail because field types of table sink are incompatible.
     tEnv.scan("sourceTable")
       .select('a, 'b, 'c)
       .insertInto("targetTable")
+
+    // trigger translation
+    tEnv.execute("job name")
   }
 }

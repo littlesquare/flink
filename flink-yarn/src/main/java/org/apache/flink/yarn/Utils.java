@@ -18,12 +18,9 @@
 
 package org.apache.flink.yarn;
 
-import org.apache.flink.api.java.tuple.Tuple2;
-import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.runtime.clusterframework.BootstrapTools;
 import org.apache.flink.runtime.clusterframework.ContaineredTaskManagerParameters;
 import org.apache.flink.runtime.util.HadoopUtils;
-import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.StringUtils;
 
 import org.apache.hadoop.conf.Configuration;
@@ -45,6 +42,7 @@ import org.apache.hadoop.yarn.api.records.LocalResource;
 import org.apache.hadoop.yarn.api.records.LocalResourceType;
 import org.apache.hadoop.yarn.api.records.LocalResourceVisibility;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.security.AMRMTokenIdentifier;
 import org.apache.hadoop.yarn.util.ConverterUtils;
 import org.apache.hadoop.yarn.util.Records;
 import org.slf4j.Logger;
@@ -60,7 +58,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.apache.flink.yarn.YarnConfigKeys.ENV_FLINK_CLASSPATH;
 
@@ -72,39 +69,13 @@ public final class Utils {
 	private static final Logger LOG = LoggerFactory.getLogger(Utils.class);
 
 	/** Keytab file name populated in YARN container. */
-	public static final String KEYTAB_FILE_NAME = "krb5.keytab";
+	public static final String DEFAULT_KEYTAB_FILE = "krb5.keytab";
 
 	/** KRB5 file name populated in YARN container for secure IT run. */
 	public static final String KRB5_FILE_NAME = "krb5.conf";
 
 	/** Yarn site xml file name populated in YARN container for secure IT run. */
 	public static final String YARN_SITE_FILE_NAME = "yarn-site.xml";
-
-	/**
-	 * See documentation.
-	 */
-	public static int calculateHeapSize(int memory, org.apache.flink.configuration.Configuration conf) {
-
-		float memoryCutoffRatio = conf.getFloat(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO);
-		int minCutoff = conf.getInteger(ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN);
-
-		if (memoryCutoffRatio > 1 || memoryCutoffRatio < 0) {
-			throw new IllegalArgumentException("The configuration value '"
-				+ ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_RATIO.key()
-				+ "' must be between 0 and 1. Value given=" + memoryCutoffRatio);
-		}
-		if (minCutoff > memory) {
-			throw new IllegalArgumentException("The configuration value '"
-				+ ResourceManagerOptions.CONTAINERIZED_HEAP_CUTOFF_MIN.key()
-				+ "' is higher (" + minCutoff + ") than the requested amount of memory " + memory);
-		}
-
-		int heapLimit = (int) ((float) memory * memoryCutoffRatio);
-		if (heapLimit < minCutoff) {
-			heapLimit = minCutoff;
-		}
-		return memory - heapLimit;
-	}
 
 	public static void setupYarnClassPath(Configuration conf, Map<String, String> appMasterEnv) {
 		addToEnvironment(
@@ -117,60 +88,6 @@ public final class Utils {
 		for (String c : applicationClassPathEntries) {
 			addToEnvironment(appMasterEnv, Environment.CLASSPATH.name(), c.trim());
 		}
-	}
-
-	/**
-	 * Copy a local file to a remote file system.
-	 *
-	 * @param fs
-	 * 		remote filesystem
-	 * @param appId
-	 * 		application ID
-	 * @param localSrcPath
-	 * 		path to the local file
-	 * @param homedir
-	 * 		remote home directory base (will be extended)
-	 * @param relativeTargetPath
-	 * 		relative target path of the file (will be prefixed be the full home directory we set up)
-	 *
-	 * @return Path to remote file (usually hdfs)
-	 */
-	static Tuple2<Path, LocalResource> setupLocalResource(
-		FileSystem fs,
-		String appId,
-		Path localSrcPath,
-		Path homedir,
-		String relativeTargetPath) throws IOException {
-
-		File localFile = new File(localSrcPath.toUri().getPath());
-		if (localFile.isDirectory()) {
-			throw new IllegalArgumentException("File to copy must not be a directory: " +
-				localSrcPath);
-		}
-
-		// copy resource to HDFS
-		String suffix =
-			".flink/"
-				+ appId
-				+ (relativeTargetPath.isEmpty() ? "" : "/" + relativeTargetPath)
-				+ "/" + localSrcPath.getName();
-
-		Path dst = new Path(homedir, suffix);
-
-		LOG.debug("Copying from {} to {}", localSrcPath, dst);
-
-		fs.copyFromLocalFile(false, true, localSrcPath, dst);
-
-		// Note: If we used registerLocalResource(FileSystem, Path) here, we would access the remote
-		//       file once again which has problems with eventually consistent read-after-write file
-		//       systems. Instead, we decide to preserve the modification time at the remote
-		//       location because this and the size of the resource will be checked by YARN based on
-		//       the values we provide to #registerLocalResource() below.
-		fs.setTimes(dst, localFile.lastModified(), -1);
-		// now create the resource instance
-		LocalResource resource = registerLocalResource(dst, localFile.length(), localFile.lastModified());
-
-		return Tuple2.of(dst, resource);
 	}
 
 	/**
@@ -205,7 +122,7 @@ public final class Utils {
 	 *
 	 * @return YARN resource
 	 */
-	private static LocalResource registerLocalResource(
+	static LocalResource registerLocalResource(
 			Path remoteRsrcPath,
 			long resourceSize,
 			long resourceModificationTime) {
@@ -322,28 +239,41 @@ public final class Utils {
 	}
 
 	/**
+	 * Resolve keytab path either as absolute path or relative to working directory.
+	 *
+	 * @param workingDir current working directory
+	 * @param keytabPath configured keytab path.
+	 * @return resolved keytab path, or null if not found.
+	 */
+	public static String resolveKeytabPath(String workingDir, String keytabPath) {
+		String keytab = null;
+		if (keytabPath != null) {
+			File f;
+			f = new File(keytabPath);
+			if (f.exists()) {
+				keytab = f.getAbsolutePath();
+				LOG.info("Resolved keytab path: {}", keytab);
+			} else {
+				// try using relative paths, this is the case when the keytab was shipped
+				// as a local resource
+				f = new File(workingDir, keytabPath);
+				if (f.exists()) {
+					keytab = f.getAbsolutePath();
+					LOG.info("Resolved keytab path: {}", keytab);
+				} else {
+					LOG.warn("Could not resolve keytab path with: {}", keytabPath);
+					keytab = null;
+				}
+			}
+		}
+		return keytab;
+	}
+
+	/**
 	 * Private constructor to prevent instantiation.
 	 */
 	private Utils() {
 		throw new RuntimeException();
-	}
-
-	/**
-	 * Method to extract environment variables from the flinkConfiguration based on the given prefix String.
-	 *
-	 * @param envPrefix Prefix for the environment variables key
-	 * @param flinkConfiguration The Flink config to get the environment variable defintion from
-	 */
-	public static Map<String, String> getEnvironmentVariables(String envPrefix, org.apache.flink.configuration.Configuration flinkConfiguration) {
-		Map<String, String> result  = new HashMap<>();
-		for (Map.Entry<String, String> entry: flinkConfiguration.toMap().entrySet()) {
-			if (entry.getKey().startsWith(envPrefix) && entry.getKey().length() > envPrefix.length()) {
-				// remove prefix
-				String key = entry.getKey().substring(envPrefix.length());
-				result.put(key, entry.getValue());
-			}
-		}
-		return result;
 	}
 
 	/**
@@ -363,8 +293,8 @@ public final class Utils {
 	 *		 The environment variables.
 	 * @param tmParams
 	 *		 The TaskExecutor container memory parameters.
-	 * @param taskManagerConfig
-	 *		 The configuration for the TaskExecutors.
+	 * @param taskManagerDynamicProperties
+	 *		 The dynamic configurations to be updated for the TaskExecutors based on client uploaded Flink config.
 	 * @param workingDirectory
 	 *		 The current application master container's working directory.
 	 * @param taskManagerMainClass
@@ -382,7 +312,7 @@ public final class Utils {
 		YarnConfiguration yarnConfig,
 		Map<String, String> env,
 		ContaineredTaskManagerParameters tmParams,
-		org.apache.flink.configuration.Configuration taskManagerConfig,
+		String taskManagerDynamicProperties,
 		String workingDirectory,
 		Class<?> taskManagerMainClass,
 		Logger log) throws Exception {
@@ -404,14 +334,16 @@ public final class Utils {
 		String yarnClientUsername = env.get(YarnConfigKeys.ENV_HADOOP_USER_NAME);
 		require(yarnClientUsername != null, "Environment variable %s not set", YarnConfigKeys.ENV_HADOOP_USER_NAME);
 
-		final String remoteKeytabPath = env.get(YarnConfigKeys.KEYTAB_PATH);
-		final String remoteKeytabPrincipal = env.get(YarnConfigKeys.KEYTAB_PRINCIPAL);
+		final String remoteKeytabPath = env.get(YarnConfigKeys.REMOTE_KEYTAB_PATH);
+		final String localKeytabPath = env.get(YarnConfigKeys.LOCAL_KEYTAB_PATH);
+		final String keytabPrincipal = env.get(YarnConfigKeys.KEYTAB_PRINCIPAL);
 		final String remoteYarnConfPath = env.get(YarnConfigKeys.ENV_YARN_SITE_XML_PATH);
 		final String remoteKrb5Path = env.get(YarnConfigKeys.ENV_KRB5_PATH);
 
 		if (log.isDebugEnabled()) {
 			log.debug("TM:remote keytab path obtained {}", remoteKeytabPath);
-			log.debug("TM:remote keytab principal obtained {}", remoteKeytabPrincipal);
+			log.debug("TM:local keytab path obtained {}", localKeytabPath);
+			log.debug("TM:keytab principal obtained {}", keytabPrincipal);
 			log.debug("TM:remote yarn conf path obtained {}", remoteYarnConfPath);
 			log.debug("TM:remote krb5 path obtained {}", remoteKrb5Path);
 		}
@@ -432,71 +364,44 @@ public final class Utils {
 		LocalResource yarnConfResource = null;
 		LocalResource krb5ConfResource = null;
 		boolean hasKrb5 = false;
-		if (remoteYarnConfPath != null && remoteKrb5Path != null) {
+		if (remoteYarnConfPath != null) {
 			log.info("TM:Adding remoteYarnConfPath {} to the container local resource bucket", remoteYarnConfPath);
 			Path yarnConfPath = new Path(remoteYarnConfPath);
 			FileSystem fs = yarnConfPath.getFileSystem(yarnConfig);
 			yarnConfResource = registerLocalResource(fs, yarnConfPath);
+		}
 
+		if (remoteKrb5Path != null) {
 			log.info("TM:Adding remoteKrb5Path {} to the container local resource bucket", remoteKrb5Path);
 			Path krb5ConfPath = new Path(remoteKrb5Path);
-			fs = krb5ConfPath.getFileSystem(yarnConfig);
+			FileSystem fs = krb5ConfPath.getFileSystem(yarnConfig);
 			krb5ConfResource = registerLocalResource(fs, krb5ConfPath);
-
 			hasKrb5 = true;
 		}
 
 		// register Flink Jar with remote HDFS
+		final String flinkJarPath;
 		final LocalResource flinkJar;
 		{
 			Path remoteJarPath = new Path(remoteFlinkJarPath);
 			FileSystem fs = remoteJarPath.getFileSystem(yarnConfig);
+			flinkJarPath = remoteJarPath.getName();
 			flinkJar = registerLocalResource(fs, remoteJarPath);
 		}
 
-		// register conf with local fs
-		final LocalResource flinkConf;
-		{
-			// write the TaskManager configuration to a local file
-			final File taskManagerConfigFile =
-					new File(workingDirectory, UUID.randomUUID() + "-taskmanager-conf.yaml");
-			log.debug("Writing TaskManager configuration to {}", taskManagerConfigFile.getAbsolutePath());
-			BootstrapTools.writeConfiguration(taskManagerConfig, taskManagerConfigFile);
-
-			try {
-				Path homeDirPath = new Path(clientHomeDir);
-				FileSystem fs = homeDirPath.getFileSystem(yarnConfig);
-
-				flinkConf = setupLocalResource(
-					fs,
-					appId,
-					new Path(taskManagerConfigFile.toURI()),
-					homeDirPath,
-					"").f1;
-
-				log.debug("Prepared local resource for modified yaml: {}", flinkConf);
-			} finally {
-				try {
-					FileUtils.deleteFileOrDirectory(taskManagerConfigFile);
-				} catch (IOException e) {
-					log.info("Could not delete temporary configuration file " +
-						taskManagerConfigFile.getAbsolutePath() + '.', e);
-				}
-			}
-		}
-
 		Map<String, LocalResource> taskManagerLocalResources = new HashMap<>();
-		taskManagerLocalResources.put("flink.jar", flinkJar);
-		taskManagerLocalResources.put("flink-conf.yaml", flinkConf);
+
+		taskManagerLocalResources.put(flinkJarPath, flinkJar);
 
 		//To support Yarn Secure Integration Test Scenario
-		if (yarnConfResource != null && krb5ConfResource != null) {
+		if (yarnConfResource != null) {
 			taskManagerLocalResources.put(YARN_SITE_FILE_NAME, yarnConfResource);
+		}
+		if (krb5ConfResource != null) {
 			taskManagerLocalResources.put(KRB5_FILE_NAME, krb5ConfResource);
 		}
-
 		if (keytabResource != null) {
-			taskManagerLocalResources.put(KEYTAB_FILE_NAME, keytabResource);
+			taskManagerLocalResources.put(localKeytabPath, keytabResource);
 		}
 
 		// prepare additional files to be shipped
@@ -519,7 +424,7 @@ public final class Utils {
 
 		String launchCommand = BootstrapTools.getTaskManagerShellCommand(
 				flinkConfig, tmParams, ".", ApplicationConstants.LOG_DIR_EXPANSION_VAR,
-				hasLogback, hasLog4j, hasKrb5, taskManagerMainClass);
+				hasLogback, hasLog4j, hasKrb5, taskManagerMainClass, taskManagerDynamicProperties);
 
 		if (log.isDebugEnabled()) {
 			log.debug("Starting TaskManagers with command: " + launchCommand);
@@ -540,9 +445,13 @@ public final class Utils {
 
 		containerEnv.put(YarnConfigKeys.ENV_HADOOP_USER_NAME, UserGroupInformation.getCurrentUser().getUserName());
 
-		if (remoteKeytabPath != null && remoteKeytabPrincipal != null) {
-			containerEnv.put(YarnConfigKeys.KEYTAB_PATH, remoteKeytabPath);
-			containerEnv.put(YarnConfigKeys.KEYTAB_PRINCIPAL, remoteKeytabPrincipal);
+		if (remoteKeytabPath != null && localKeytabPath != null && keytabPrincipal != null) {
+			containerEnv.put(YarnConfigKeys.REMOTE_KEYTAB_PATH, remoteKeytabPath);
+			containerEnv.put(YarnConfigKeys.LOCAL_KEYTAB_PATH, localKeytabPath);
+			containerEnv.put(YarnConfigKeys.KEYTAB_PRINCIPAL, keytabPrincipal);
+		} else if (localKeytabPath != null && keytabPrincipal != null) {
+			containerEnv.put(YarnConfigKeys.LOCAL_KEYTAB_PATH, localKeytabPath);
+			containerEnv.put(YarnConfigKeys.KEYTAB_PRINCIPAL, keytabPrincipal);
 		}
 
 		ctx.setEnvironment(containerEnv);
@@ -565,7 +474,17 @@ public final class Utils {
 						new File(fileLocation),
 						HadoopUtils.getHadoopConfiguration(flinkConfig));
 
-				cred.writeTokenStorageToStream(dob);
+				// Filter out AMRMToken before setting the tokens to the TaskManager container context.
+				Credentials taskManagerCred = new Credentials();
+				Collection<Token<? extends TokenIdentifier>> userTokens = cred.getAllTokens();
+				for (Token<? extends TokenIdentifier> token : userTokens) {
+					if (!token.getKind().equals(AMRMTokenIdentifier.KIND_NAME)) {
+						final Text id = new Text(token.getIdentifier());
+						taskManagerCred.addToken(id, token);
+					}
+				}
+
+				taskManagerCred.writeTokenStorageToStream(dob);
 				ByteBuffer securityTokens = ByteBuffer.wrap(dob.getData(), 0, dob.getLength());
 				ctx.setTokens(securityTokens);
 			} catch (Throwable t) {
@@ -591,5 +510,4 @@ public final class Utils {
 			throw new RuntimeException(String.format(message, values));
 		}
 	}
-
 }

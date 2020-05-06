@@ -19,26 +19,31 @@
 package org.apache.flink.table.expressions;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.table.api.ApiExpression;
+import org.apache.flink.table.api.DataTypes;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.ValidationException;
-import org.apache.flink.table.typeutils.RowIntervalTypeInfo;
-import org.apache.flink.table.typeutils.TimeIntervalTypeInfo;
+import org.apache.flink.table.functions.BuiltInFunctionDefinition;
+import org.apache.flink.table.functions.BuiltInFunctionDefinitions;
+import org.apache.flink.table.functions.FunctionDefinition;
+import org.apache.flink.table.functions.FunctionIdentifier;
+import org.apache.flink.table.functions.FunctionKind;
+import org.apache.flink.table.operations.QueryOperation;
+import org.apache.flink.table.types.DataType;
+import org.apache.flink.types.Row;
 
+import java.lang.reflect.Array;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
-
-import static org.apache.flink.table.expressions.BuiltInFunctionDefinitions.CAST;
-import static org.apache.flink.table.expressions.BuiltInFunctionDefinitions.TIMES;
-import static org.apache.flink.table.expressions.BuiltInFunctionDefinitions.WINDOW_PROPERTIES;
-import static org.apache.flink.table.expressions.FunctionDefinition.Type.AGGREGATE_FUNCTION;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 /**
  * Utilities for API-specific {@link Expression}s.
@@ -52,290 +57,299 @@ public final class ApiExpressionUtils {
 
 	public static final long MILLIS_PER_HOUR = 3600000L; // = 60 * 60 * 1000
 
-	public static final long MILLIS_PER_DAY = 86400000; // = 24 * 60 * 60 * 1000
+	public static final long MILLIS_PER_DAY = 86400000L; // = 24 * 60 * 60 * 1000
 
 	private ApiExpressionUtils() {
 		// private
 	}
 
-	public static CallExpression call(FunctionDefinition functionDefinition, Expression... args) {
-		return new CallExpression(functionDefinition, Arrays.asList(args));
+	/**
+	 * Converts a given object to an expression.
+	 *
+	 * <p>It converts:
+	 * <ul>
+	 *     <li>{@code null} to null literal</li>
+	 *     <li>{@link Row} to a call to a row constructor expression</li>
+	 *     <li>{@link Map} to a call to a map constructor expression</li>
+	 *     <li>{@link List} to a call to an array constructor expression</li>
+	 *     <li>arrays to a call to an array constructor expression</li>
+	 *     <li>Scala's {@code Seq} to an array constructor via reflection</li>
+	 *     <li>Scala's {@code Map} to a map constructor via reflection</li>
+	 *     <li>Scala's {@code BigDecimal} to a DECIMAL literal</li>
+	 *     <li>if none of the above applies, the function tries to convert the object
+	 *          to a value literal with {@link #valueLiteral(Object)}</li>
+	 * </ul>
+	 *
+	 * @param expression An object to convert to an expression
+	 */
+	public static Expression objectToExpression(Object expression) {
+		if (expression == null) {
+			return valueLiteral(null, DataTypes.NULL());
+		} else if (expression instanceof ApiExpression) {
+			return ((ApiExpression) expression).toExpr();
+		} else if (expression instanceof Expression) {
+			return (Expression) expression;
+		} else if (expression instanceof Row) {
+			return convertRow((Row) expression);
+		} else if (expression instanceof Map) {
+			return convertJavaMap((Map<?, ?>) expression);
+		} else if (expression instanceof byte[]) {
+			// BINARY LITERAL
+			return valueLiteral(expression);
+		} else if (expression.getClass().isArray()) {
+			return convertArray(expression);
+		} else if (expression instanceof List) {
+			return convertJavaList((List<?>) expression);
+		} else {
+			return convertScala(expression).orElseGet(() -> valueLiteral(expression));
+		}
+	}
+
+	private static Expression convertRow(Row expression) {
+		List<Expression> fields = IntStream.range(0, expression.getArity())
+			.mapToObj(expression::getField)
+			.map(ApiExpressionUtils::objectToExpression)
+			.collect(Collectors.toList());
+
+		return unresolvedCall(BuiltInFunctionDefinitions.ROW, fields);
+	}
+
+	private static Expression convertJavaMap(Map<?, ?> expression) {
+		List<Expression> entries = expression.entrySet()
+			.stream()
+			.flatMap(e -> Stream.of(
+				objectToExpression(e.getKey()),
+				objectToExpression(e.getValue())
+			)).collect(Collectors.toList());
+
+		return unresolvedCall(BuiltInFunctionDefinitions.MAP, entries);
+	}
+
+	private static Expression convertJavaList(List<?> expression) {
+		List<Expression> entries = expression
+			.stream()
+			.map(ApiExpressionUtils::objectToExpression)
+			.collect(Collectors.toList());
+
+		return unresolvedCall(BuiltInFunctionDefinitions.ARRAY, entries);
+	}
+
+	private static Expression convertArray(Object expression) {
+		int length = Array.getLength(expression);
+		List<Expression> entries = IntStream.range(0, length)
+			.mapToObj(idx -> Array.get(expression, idx))
+			.map(ApiExpressionUtils::objectToExpression)
+			.collect(Collectors.toList());
+		return unresolvedCall(BuiltInFunctionDefinitions.ARRAY, entries);
+	}
+
+	private static Optional<Expression> convertScala(Object obj) {
+		try {
+			Optional<Expression> array = convertScalaSeq(obj);
+			if (array.isPresent()) {
+				return array;
+			}
+
+			Optional<Expression> bigDecimal = convertScalaBigDecimal(obj);
+			if (bigDecimal.isPresent()) {
+				return bigDecimal;
+			}
+
+			return convertScalaMap(obj);
+		} catch (Exception e) {
+			return Optional.empty();
+		}
+	}
+
+	private static Optional<Expression> convertScalaMap(Object obj)
+			throws ClassNotFoundException, NoSuchMethodException, IllegalAccessException, InvocationTargetException {
+		Class<?> mapClass = Class.forName("scala.collection.Map");
+		if (mapClass.isAssignableFrom(obj.getClass())) {
+			Class<?> seqClass = Class.forName("scala.collection.Seq");
+			Class<?> productClass = Class.forName("scala.Product");
+			Method getElement = productClass.getMethod("productElement", int.class);
+			Method toSeq = mapClass.getMethod("toSeq");
+			Method getMethod = seqClass.getMethod("apply", Object.class);
+			Method lengthMethod = seqClass.getMethod("length");
+
+			Object mapAsSeq = toSeq.invoke(obj);
+			List<Expression> entries = new ArrayList<>();
+			for (int i = 0; i < (Integer) lengthMethod.invoke(mapAsSeq); i++) {
+				Object mapEntry = getMethod.invoke(mapAsSeq, i);
+
+				Object key = getElement.invoke(mapEntry, 0);
+				Object value = getElement.invoke(mapEntry, 1);
+				entries.add(objectToExpression(key));
+				entries.add(objectToExpression(value));
+			}
+
+			return Optional.of(unresolvedCall(BuiltInFunctionDefinitions.MAP, entries));
+		}
+		return Optional.empty();
+	}
+
+	private static Optional<Expression> convertScalaSeq(Object obj)
+			throws ClassNotFoundException, NoSuchMethodException, IllegalAccessException, InvocationTargetException {
+		Class<?> seqClass = Class.forName("scala.collection.Seq");
+		if (seqClass.isAssignableFrom(obj.getClass())) {
+			Method getMethod = seqClass.getMethod("apply", Object.class);
+			Method lengthMethod = seqClass.getMethod("length");
+
+			List<Expression> entries = new ArrayList<>();
+			for (int i = 0; i < (Integer) lengthMethod.invoke(obj); i++) {
+				entries.add(objectToExpression(getMethod.invoke(obj, i)));
+			}
+
+			return Optional.of(unresolvedCall(BuiltInFunctionDefinitions.ARRAY, entries));
+		}
+		return Optional.empty();
+	}
+
+	private static Optional<Expression> convertScalaBigDecimal(Object obj)
+			throws ClassNotFoundException, NoSuchMethodException, IllegalAccessException, InvocationTargetException {
+		Class<?> decimalClass = Class.forName("scala.math.BigDecimal");
+		if (decimalClass.equals(obj.getClass())) {
+			Method toJava = decimalClass.getMethod("underlying");
+			BigDecimal bigDecimal = (BigDecimal) toJava.invoke(obj);
+			return Optional.of(valueLiteral(bigDecimal));
+		}
+		return Optional.empty();
+	}
+
+	public static Expression unwrapFromApi(Expression expression) {
+		if (expression instanceof ApiExpression) {
+			return ((ApiExpression) expression).toExpr();
+		} else {
+			return expression;
+		}
+	}
+
+	public static LocalReferenceExpression localRef(String name, DataType dataType) {
+		return new LocalReferenceExpression(name, dataType);
 	}
 
 	public static ValueLiteralExpression valueLiteral(Object value) {
 		return new ValueLiteralExpression(value);
 	}
 
-	public static ValueLiteralExpression valueLiteral(Object value, TypeInformation<?> type) {
-		return new ValueLiteralExpression(value, type);
+	public static ValueLiteralExpression valueLiteral(Object value, DataType dataType) {
+		return new ValueLiteralExpression(value, dataType);
 	}
 
-	public static TypeLiteralExpression typeLiteral(TypeInformation<?> type) {
-		return new TypeLiteralExpression(type);
+	public static TypeLiteralExpression typeLiteral(DataType dataType) {
+		return new TypeLiteralExpression(dataType);
 	}
 
-	public static SymbolExpression symbol(TableSymbol symbol) {
-		return new SymbolExpression(symbol);
+	public static UnresolvedReferenceExpression unresolvedRef(String name) {
+		return new UnresolvedReferenceExpression(name);
 	}
 
-	public static UnresolvedFieldReferenceExpression unresolvedFieldRef(String name) {
-		return new UnresolvedFieldReferenceExpression(name);
+	public static UnresolvedCallExpression unresolvedCall(
+			FunctionIdentifier functionIdentifier,
+			FunctionDefinition functionDefinition,
+			Expression... args) {
+		return unresolvedCall(functionIdentifier, functionDefinition, Arrays.asList(args));
+	}
+
+	public static UnresolvedCallExpression unresolvedCall(
+			FunctionIdentifier functionIdentifier,
+			FunctionDefinition functionDefinition,
+			List<Expression> args) {
+		return new UnresolvedCallExpression(functionIdentifier, functionDefinition,
+			args.stream()
+				.map(ApiExpressionUtils::unwrapFromApi)
+				.collect(Collectors.toList()));
+	}
+
+	public static UnresolvedCallExpression unresolvedCall(FunctionDefinition functionDefinition, Expression... args) {
+		return unresolvedCall(functionDefinition, Arrays.asList(args));
+	}
+
+	public static UnresolvedCallExpression unresolvedCall(FunctionDefinition functionDefinition, List<Expression> args) {
+		return new UnresolvedCallExpression(
+			functionDefinition,
+			args.stream()
+				.map(ApiExpressionUtils::unwrapFromApi)
+				.collect(Collectors.toList()));
 	}
 
 	public static TableReferenceExpression tableRef(String name, Table table) {
-		return new TableReferenceExpression(name, table);
+		return tableRef(name, table.getQueryOperation());
+	}
+
+	public static TableReferenceExpression tableRef(String name, QueryOperation queryOperation) {
+		return new TableReferenceExpression(name, queryOperation);
 	}
 
 	public static LookupCallExpression lookupCall(String name, Expression... args) {
-		return new LookupCallExpression(name, Arrays.asList(args));
+		return new LookupCallExpression(
+			name,
+			Arrays.stream(args)
+				.map(ApiExpressionUtils::unwrapFromApi)
+				.collect(Collectors.toList()));
 	}
 
 	public static Expression toMonthInterval(Expression e, int multiplier) {
-		// check for constant
-		return extractValue(e, BasicTypeInfo.INT_TYPE_INFO)
-			.map((v) -> (Expression) valueLiteral(v * multiplier, TimeIntervalTypeInfo.INTERVAL_MONTHS))
-			.orElse(
-				call(
-					CAST,
-					call(
-						TIMES,
-						e,
-						valueLiteral(multiplier)
-					),
-					typeLiteral(TimeIntervalTypeInfo.INTERVAL_MONTHS)
-				)
-			);
+		return ExpressionUtils.extractValue(e, BigDecimal.class)
+			.map((v) -> intervalOfMonths(v.intValue() * multiplier))
+			.orElseThrow(() -> new ValidationException("Invalid constant for year-month interval: " + e));
+	}
+
+	public static ValueLiteralExpression intervalOfMillis(long millis) {
+		return valueLiteral(
+			millis,
+			DataTypes.INTERVAL(DataTypes.SECOND(3)).notNull().bridgedTo(Long.class));
 	}
 
 	public static Expression toMilliInterval(Expression e, long multiplier) {
-		final Optional<Expression> intInterval = extractValue(e, BasicTypeInfo.INT_TYPE_INFO)
-			.map((v) -> valueLiteral(v * multiplier, TimeIntervalTypeInfo.INTERVAL_MILLIS));
+		return ExpressionUtils.extractValue(e, BigDecimal.class)
+			.map((v) -> intervalOfMillis(v.longValue() * multiplier))
+			.orElseThrow(() -> new ValidationException("Invalid constant for day-time interval: " + e));
+	}
 
-		final Optional<Expression> longInterval = extractValue(e, BasicTypeInfo.LONG_TYPE_INFO)
-			.map((v) -> valueLiteral(v * multiplier, TimeIntervalTypeInfo.INTERVAL_MILLIS));
-
-		if (intInterval.isPresent()) {
-			return intInterval.get();
-		} else if (longInterval.isPresent()) {
-			return longInterval.get();
-		}
-		return call(
-			CAST,
-			call(
-				TIMES,
-				e,
-				valueLiteral(multiplier)
-			),
-			typeLiteral(TimeIntervalTypeInfo.INTERVAL_MONTHS)
-		);
+	public static ValueLiteralExpression intervalOfMonths(int months) {
+		return valueLiteral(
+			months,
+			DataTypes.INTERVAL(DataTypes.MONTH()).notNull().bridgedTo(Integer.class));
 	}
 
 	public static Expression toRowInterval(Expression e) {
-		final Optional<Expression> intInterval = extractValue(e, BasicTypeInfo.INT_TYPE_INFO)
-			.map((v) -> valueLiteral((long) v, RowIntervalTypeInfo.INTERVAL_ROWS));
-
-		final Optional<Expression> longInterval = extractValue(e, BasicTypeInfo.LONG_TYPE_INFO)
-			.map((v) -> valueLiteral(v, RowIntervalTypeInfo.INTERVAL_ROWS));
-
-		if (intInterval.isPresent()) {
-			return intInterval.get();
-		} else if (longInterval.isPresent()) {
-			return longInterval.get();
-		}
-		throw new ValidationException("Invalid value for row interval literal: " + e);
-	}
-
-	@SuppressWarnings("unchecked")
-	public static <V> Optional<V> extractValue(Expression e, TypeInformation<V> type) {
-		if (e instanceof ValueLiteralExpression) {
-			final ValueLiteralExpression valueLiteral = (ValueLiteralExpression) e;
-			if (valueLiteral.getType().equals(type)) {
-				return Optional.of((V) valueLiteral.getValue());
-			}
-		}
-		return Optional.empty();
+		return ExpressionUtils.extractValue(e, BigDecimal.class)
+			.map(bd -> ApiExpressionUtils.valueLiteral(bd.longValue()))
+			.orElseThrow(() -> new ValidationException("Invalid constant for row interval: " + e));
 	}
 
 	/**
-	 * Container for extracted expressions of the same family.
-	 */
-	@Internal
-	public static class CategorizedExpressions {
-		private final Map<Expression, String> aggregations;
-		private final Map<Expression, String> windowProperties;
-
-		CategorizedExpressions(
-			Map<Expression, String> aggregations,
-			Map<Expression, String> windowProperties) {
-			this.aggregations = aggregations;
-			this.windowProperties = windowProperties;
-		}
-
-		public Map<Expression, String> getAggregations() {
-			return aggregations;
-		}
-
-		public Map<Expression, String> getWindowProperties() {
-			return windowProperties;
-		}
-	}
-
-	/**
-	 * Extracts and deduplicates all aggregation and window property expressions (zero, one, or more)
-	 * from the given expressions.
+	 * Checks if the expression is a function call of given type.
 	 *
-	 * @param expressions a list of expressions to extract
-	 * @param uniqueAttributeGenerator a supplier that every time returns a unique attribute
-	 * @return a Tuple2, the first field contains the extracted and deduplicated aggregations,
-	 * and the second field contains the extracted and deduplicated window properties.
+	 * @param expression expression to check
+	 * @param kind expected type of function
+	 * @return true if the expression is function call of given type, false otherwise
 	 */
-	public static CategorizedExpressions extractAggregationsAndProperties(
-			List<Expression> expressions,
-			Supplier<String> uniqueAttributeGenerator) {
-		AggregationAndPropertiesSplitter splitter = new AggregationAndPropertiesSplitter(uniqueAttributeGenerator);
-		expressions.forEach(expr -> expr.accept(splitter));
-
-		return new CategorizedExpressions(splitter.aggregates, splitter.properties);
-	}
-
-	private static class AggregationAndPropertiesSplitter extends ApiExpressionDefaultVisitor<Void> {
-
-		private final Map<Expression, String> aggregates = new LinkedHashMap<>();
-		private final Map<Expression, String> properties = new LinkedHashMap<>();
-		private final Supplier<String> uniqueAttributeGenerator;
-
-		private AggregationAndPropertiesSplitter(Supplier<String> uniqueAttributeGenerator) {
-			this.uniqueAttributeGenerator = uniqueAttributeGenerator;
+	public static boolean isFunctionOfKind(Expression expression, FunctionKind kind) {
+		if (expression instanceof UnresolvedCallExpression) {
+			return ((UnresolvedCallExpression) expression).getFunctionDefinition().getKind() == kind;
 		}
-
-		@Override
-		public Void visitLookupCall(LookupCallExpression unresolvedCall) {
-			throw new IllegalStateException("All calls should be resolved by now. Got: " + unresolvedCall);
+		if (expression instanceof CallExpression) {
+			return ((CallExpression) expression).getFunctionDefinition().getKind() == kind;
 		}
-
-		@Override
-		public Void visitCall(CallExpression call) {
-			FunctionDefinition functionDefinition = call.getFunctionDefinition();
-			if (functionDefinition.getType() == AGGREGATE_FUNCTION) {
-				aggregates.computeIfAbsent(call, expr -> uniqueAttributeGenerator.get());
-			} else if (WINDOW_PROPERTIES.contains(functionDefinition)) {
-				properties.computeIfAbsent(call, expr -> uniqueAttributeGenerator.get());
-			} else {
-				call.getChildren().forEach(c -> c.accept(this));
-			}
-			return null;
-		}
-
-		@Override
-		protected Void defaultMethod(Expression expression) {
-			return null;
-		}
+		return false;
 	}
 
 	/**
-	 * Replaces expressions with deduplicated aggregations and properties.
+	 * Checks if the given expression is a given builtin function.
 	 *
-	 * @param expressions     a list of expressions to replace
-	 * @param aggNames  the deduplicated aggregations
-	 * @param propNames the deduplicated properties
-	 * @return a list of replaced expressions
+	 * @param expression expression to check
+	 * @param functionDefinition expected function definition
+	 * @return true if the given expression is a given function call
 	 */
-	public static List<Expression> replaceAggregationsAndProperties(
-			List<Expression> expressions,
-			Map<Expression, String> aggNames,
-			Map<Expression, String> propNames) {
-		AggregationAndPropertiesReplacer replacer = new AggregationAndPropertiesReplacer(aggNames, propNames);
-		return expressions.stream()
-			.map(expr -> expr.accept(replacer))
-			.collect(Collectors.toList());
-	}
-
-	private static class AggregationAndPropertiesReplacer extends ApiExpressionDefaultVisitor<Expression> {
-
-		private final Map<Expression, String> aggregates;
-		private final Map<Expression, String> properties;
-
-		private AggregationAndPropertiesReplacer(
-			Map<Expression, String> aggregates,
-			Map<Expression, String> properties) {
-			this.aggregates = aggregates;
-			this.properties = properties;
+	public static boolean isFunction(Expression expression, BuiltInFunctionDefinition functionDefinition) {
+		if (expression instanceof UnresolvedCallExpression) {
+			return ((UnresolvedCallExpression) expression).getFunctionDefinition() == functionDefinition;
 		}
-
-		@Override
-		public Expression visitLookupCall(LookupCallExpression unresolvedCall) {
-			throw new IllegalStateException("All calls should be resolved by now. Got: " + unresolvedCall);
+		if (expression instanceof CallExpression) {
+			return ((CallExpression) expression).getFunctionDefinition() == functionDefinition;
 		}
-
-		@Override
-		public Expression visitCall(CallExpression call) {
-			if (aggregates.get(call) != null) {
-				return unresolvedFieldRef(aggregates.get(call));
-			} else if (properties.get(call) != null) {
-				return unresolvedFieldRef(properties.get(call));
-			}
-
-			List<Expression> args = call.getChildren()
-				.stream()
-				.map(c -> c.accept(this))
-				.collect(Collectors.toList());
-			return new CallExpression(call.getFunctionDefinition(), args);
-		}
-
-		@Override
-		protected Expression defaultMethod(Expression expression) {
-			return expression;
-		}
-	}
-
-	/**
-	 * Extract all field references from the given expressions.
-	 *
-	 * @param expressions a list of expressions to extract
-	 * @return a list of field references extracted from the given expressions
-	 */
-	public static List<Expression> extractFieldReferences(List<Expression> expressions) {
-		FieldReferenceExtractor referenceExtractor = new FieldReferenceExtractor();
-		return expressions.stream()
-			.flatMap(expr -> expr.accept(referenceExtractor).stream())
-			.distinct()
-			.collect(Collectors.toList());
-	}
-
-	private static class FieldReferenceExtractor extends ApiExpressionDefaultVisitor<List<Expression>> {
-
-		@Override
-		public List<Expression> visitCall(CallExpression call) {
-			FunctionDefinition functionDefinition = call.getFunctionDefinition();
-			if (WINDOW_PROPERTIES.contains(functionDefinition)) {
-				return Collections.emptyList();
-			} else {
-				return call.getChildren()
-					.stream()
-					.flatMap(c -> c.accept(this).stream())
-					.distinct()
-					.collect(Collectors.toList());
-			}
-		}
-
-		@Override
-		public List<Expression> visitLookupCall(LookupCallExpression unresolvedCall) {
-			throw new IllegalStateException("All calls should be resolved by now. Got: " + unresolvedCall);
-		}
-
-		@Override
-		public List<Expression> visitFieldReference(FieldReferenceExpression fieldReference) {
-			return Collections.singletonList(fieldReference);
-		}
-
-		@Override
-		public List<Expression> visitUnresolvedField(UnresolvedFieldReferenceExpression fieldReference) {
-			return Collections.singletonList(fieldReference);
-		}
-
-		@Override
-		protected List<Expression> defaultMethod(Expression expression) {
-			return Collections.emptyList();
-		}
+		return false;
 	}
 }

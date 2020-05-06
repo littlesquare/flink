@@ -23,6 +23,7 @@ import org.apache.flink.api.common.io.DefaultInputSplitAssigner;
 import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.io.RichInputFormat;
 import org.apache.flink.api.common.io.statistics.BaseStatistics;
+import org.apache.flink.api.java.io.jdbc.source.row.converter.JDBCRowConverter;
 import org.apache.flink.api.java.io.jdbc.split.ParameterValuesProvider;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
 import org.apache.flink.api.java.typeutils.RowTypeInfo;
@@ -111,11 +112,14 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 	private int resultSetType;
 	private int resultSetConcurrency;
 	private RowTypeInfo rowTypeInfo;
+	private JDBCRowConverter rowConverter;
 
 	private transient Connection dbConn;
 	private transient PreparedStatement statement;
 	private transient ResultSet resultSet;
 	private int fetchSize;
+	// Boolean to distinguish between default value and explicitly set autoCommit mode.
+	private Boolean autoCommit;
 
 	private boolean hasNext;
 	private Object[][] parameterValues;
@@ -143,6 +147,13 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 			} else {
 				dbConn = DriverManager.getConnection(dbURL, username, password);
 			}
+
+			// set autoCommit mode only if it was explicitly configured.
+			// keep connection default otherwise.
+			if (autoCommit != null) {
+				dbConn.setAutoCommit(autoCommit);
+			}
+
 			statement = dbConn.prepareStatement(queryTemplate, resultSetType, resultSetConcurrency);
 			if (fetchSize == Integer.MIN_VALUE || fetchSize > 0) {
 				statement.setFetchSize(fetchSize);
@@ -273,19 +284,17 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 	/**
 	 * Stores the next resultSet row in a tuple.
 	 *
-	 * @param row row to be reused.
+	 * @param reuse row to be reused.
 	 * @return row containing next {@link Row}
 	 * @throws java.io.IOException
 	 */
 	@Override
-	public Row nextRecord(Row row) throws IOException {
+	public Row nextRecord(Row reuse) throws IOException {
 		try {
 			if (!hasNext) {
 				return null;
 			}
-			for (int pos = 0; pos < row.getArity(); pos++) {
-				row.setField(pos, resultSet.getObject(pos + 1));
-			}
+			Row row = rowConverter.convert(resultSet, reuse);
 			//update hasNext after we've read the record
 			hasNext = resultSet.next();
 			return row;
@@ -323,6 +332,11 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 		return statement;
 	}
 
+	@VisibleForTesting
+	Connection getDbConn() {
+		return dbConn;
+	}
+
 	/**
 	 * A builder used to set parameters to the output format's configuration in a fluent way.
 	 * @return builder
@@ -332,7 +346,7 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 	}
 
 	/**
-	 * Builder for a {@link JDBCInputFormat}.
+	 * Builder for {@link JDBCInputFormat}.
 	 */
 	public static class JDBCInputFormatBuilder {
 		private final JDBCInputFormat format;
@@ -389,10 +403,20 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 			return this;
 		}
 
+		public JDBCInputFormatBuilder setRowConverter(JDBCRowConverter rowConverter) {
+			format.rowConverter = rowConverter;
+			return this;
+		}
+
 		public JDBCInputFormatBuilder setFetchSize(int fetchSize) {
 			Preconditions.checkArgument(fetchSize == Integer.MIN_VALUE || fetchSize > 0,
 				"Illegal value %s for fetchSize, has to be positive or Integer.MIN_VALUE.", fetchSize);
 			format.fetchSize = fetchSize;
+			return this;
+		}
+
+		public JDBCInputFormatBuilder setAutoCommit(Boolean autoCommit) {
+			format.autoCommit = autoCommit;
 			return this;
 		}
 
@@ -414,6 +438,9 @@ public class JDBCInputFormat extends RichInputFormat<Row, InputSplit> implements
 			}
 			if (format.rowTypeInfo == null) {
 				throw new IllegalArgumentException("No " + RowTypeInfo.class.getSimpleName() + " supplied");
+			}
+			if (format.rowConverter == null) {
+				throw new IllegalArgumentException("No row converter supplied");
 			}
 			if (format.parameterValues == null) {
 				LOG.debug("No input splitting configured (data will be read with parallelism 1).");

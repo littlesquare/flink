@@ -25,6 +25,8 @@ import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.concurrent.Executors;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.groups.UnregisteredMetricGroups;
+import org.apache.flink.runtime.taskexecutor.TaskExecutorResourceUtils;
 import org.apache.flink.runtime.taskexecutor.TaskManagerServices;
 import org.apache.flink.runtime.taskexecutor.TaskManagerServicesConfiguration;
 import org.apache.flink.util.FileUtils;
@@ -43,7 +45,7 @@ public class TaskExecutorLocalStateStoresManagerTest extends TestLogger {
 	@ClassRule
 	public static TemporaryFolder temporaryFolder = new TemporaryFolder();
 
-	private static final long MEM_SIZE_PARAM = 128L*1024*1024;
+	private static final int TOTAL_FLINK_MEMORY_MB = 1024;
 
 	/**
 	 * This tests that the creation of {@link TaskManagerServices} correctly creates the local state root directory
@@ -64,17 +66,7 @@ public class TaskExecutorLocalStateStoresManagerTest extends TestLogger {
 		// test configuration of the local state mode
 		config.setBoolean(CheckpointingOptions.LOCAL_RECOVERY, true);
 
-		final ResourceID tmResourceID = ResourceID.generate();
-
-		TaskManagerServicesConfiguration taskManagerServicesConfiguration =
-			TaskManagerServicesConfiguration.fromConfiguration(config, InetAddress.getLocalHost(), true);
-
-		TaskManagerServices taskManagerServices = TaskManagerServices.fromConfiguration(
-			taskManagerServicesConfiguration,
-			tmResourceID,
-			Executors.directExecutor(),
-			MEM_SIZE_PARAM,
-			MEM_SIZE_PARAM);
+		TaskManagerServices taskManagerServices = createTaskManagerServices(createTaskManagerServiceConfiguration(config));
 
 		TaskExecutorLocalStateStoresManager taskStateManager = taskManagerServices.getTaskManagerStateStore();
 
@@ -105,17 +97,9 @@ public class TaskExecutorLocalStateStoresManagerTest extends TestLogger {
 
 		final Configuration config = new Configuration();
 
-		final ResourceID tmResourceID = ResourceID.generate();
+		TaskManagerServicesConfiguration taskManagerServicesConfiguration = createTaskManagerServiceConfiguration(config);
 
-		TaskManagerServicesConfiguration taskManagerServicesConfiguration =
-			TaskManagerServicesConfiguration.fromConfiguration(config, InetAddress.getLocalHost(), true);
-
-		TaskManagerServices taskManagerServices = TaskManagerServices.fromConfiguration(
-			taskManagerServicesConfiguration,
-			tmResourceID,
-			Executors.directExecutor(),
-			MEM_SIZE_PARAM,
-			MEM_SIZE_PARAM);
+		TaskManagerServices taskManagerServices = createTaskManagerServices(taskManagerServicesConfiguration);
 
 		TaskExecutorLocalStateStoresManager taskStateManager = taskManagerServices.getTaskManagerStateStore();
 
@@ -216,5 +200,23 @@ public class TaskExecutorLocalStateStoresManagerTest extends TestLogger {
 				Assert.assertArrayEquals(new File[0], files);
 			}
 		}
+	}
+
+	private TaskManagerServicesConfiguration createTaskManagerServiceConfiguration(
+			Configuration config) throws Exception {
+		return TaskManagerServicesConfiguration.fromConfiguration(
+			config,
+			ResourceID.generate(),
+			InetAddress.getLocalHost().getHostName(),
+			true,
+			TaskExecutorResourceUtils.resourceSpecFromConfigForLocalExecution(config));
+	}
+
+	private TaskManagerServices createTaskManagerServices(
+			TaskManagerServicesConfiguration config) throws Exception {
+		return TaskManagerServices.fromConfiguration(
+			config,
+			UnregisteredMetricGroups.createUnregisteredTaskManagerMetricGroup(),
+			Executors.directExecutor());
 	}
 }

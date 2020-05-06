@@ -21,6 +21,7 @@ package org.apache.flink.runtime.taskexecutor;
 import org.apache.flink.runtime.blob.BlobCacheService;
 import org.apache.flink.runtime.heartbeat.HeartbeatServices;
 import org.apache.flink.runtime.highavailability.HighAvailabilityServices;
+import org.apache.flink.runtime.io.network.partition.TaskExecutorPartitionTracker;
 import org.apache.flink.runtime.metrics.groups.TaskManagerMetricGroup;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.rpc.RpcService;
@@ -42,9 +43,11 @@ class TestingTaskExecutor extends TaskExecutor {
 			TaskManagerServices taskExecutorServices,
 			HeartbeatServices heartbeatServices,
 			TaskManagerMetricGroup taskManagerMetricGroup,
-			@Nullable String metricQueryServicePath,
+			@Nullable String metricQueryServiceAddress,
 			BlobCacheService blobCacheService,
-			FatalErrorHandler fatalErrorHandler) {
+			FatalErrorHandler fatalErrorHandler,
+			TaskExecutorPartitionTracker partitionTracker,
+			BackPressureSampleService backPressureSampleService) {
 		super(
 			rpcService,
 			taskManagerConfiguration,
@@ -52,9 +55,11 @@ class TestingTaskExecutor extends TaskExecutor {
 			taskExecutorServices,
 			heartbeatServices,
 			taskManagerMetricGroup,
-			metricQueryServicePath,
+			metricQueryServiceAddress,
 			blobCacheService,
-			fatalErrorHandler);
+			fatalErrorHandler,
+			partitionTracker,
+			backPressureSampleService);
 	}
 
 	@Override

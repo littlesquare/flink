@@ -63,6 +63,8 @@ public class EventSerializer {
 
 	private static final int CHECKPOINT_TYPE_SAVEPOINT = 1;
 
+	private static final int CHECKPOINT_TYPE_SYNC_SAVEPOINT = 2;
+
 	// ------------------------------------------------------------------------
 	//  Serialization Logic
 	// ------------------------------------------------------------------------
@@ -206,7 +208,7 @@ public class EventSerializer {
 		final byte[] locationBytes = checkpointOptions.getTargetLocation().isDefaultReference() ?
 				null : checkpointOptions.getTargetLocation().getReferenceBytes();
 
-		final ByteBuffer buf = ByteBuffer.allocate(28 + (locationBytes == null ? 0 : locationBytes.length));
+		final ByteBuffer buf = ByteBuffer.allocate(30 + (locationBytes == null ? 0 : locationBytes.length));
 
 		// we do not use checkpointType.ordinal() here to make the serialization robust
 		// against changes in the enum (such as changes in the order of the values)
@@ -215,6 +217,8 @@ public class EventSerializer {
 			typeInt = CHECKPOINT_TYPE_CHECKPOINT;
 		} else if (checkpointType == CheckpointType.SAVEPOINT) {
 			typeInt = CHECKPOINT_TYPE_SAVEPOINT;
+		} else if (checkpointType == CheckpointType.SYNC_SAVEPOINT) {
+			typeInt = CHECKPOINT_TYPE_SYNC_SAVEPOINT;
 		} else {
 			throw new IOException("Unknown checkpoint type: " + checkpointType);
 		}
@@ -230,6 +234,8 @@ public class EventSerializer {
 			buf.putInt(locationBytes.length);
 			buf.put(locationBytes);
 		}
+		buf.put((byte) (checkpointOptions.isExactlyOnceMode() ? 1 : 0));
+		buf.put((byte) (checkpointOptions.isUnalignedCheckpoint() ? 1 : 0));
 
 		buf.flip();
 		return buf;
@@ -247,6 +253,8 @@ public class EventSerializer {
 			checkpointType = CheckpointType.CHECKPOINT;
 		} else if (checkpointTypeCode == CHECKPOINT_TYPE_SAVEPOINT) {
 			checkpointType = CheckpointType.SAVEPOINT;
+		} else if (checkpointTypeCode == CHECKPOINT_TYPE_SYNC_SAVEPOINT) {
+			checkpointType = CheckpointType.SYNC_SAVEPOINT;
 		} else {
 			throw new IOException("Unknown checkpoint type code: " + checkpointTypeCode);
 		}
@@ -259,8 +267,13 @@ public class EventSerializer {
 			buffer.get(bytes);
 			locationRef = new CheckpointStorageLocationReference(bytes);
 		}
+		final boolean isExactlyOnceMode = buffer.get() == 1;
+		final boolean isUnalignedCheckpoint = buffer.get() == 1;
 
-		return new CheckpointBarrier(id, timestamp, new CheckpointOptions(checkpointType, locationRef));
+		return new CheckpointBarrier(
+			id,
+			timestamp,
+			new CheckpointOptions(checkpointType, locationRef, isExactlyOnceMode, isUnalignedCheckpoint));
 	}
 
 	// ------------------------------------------------------------------------
@@ -272,7 +285,7 @@ public class EventSerializer {
 
 		MemorySegment data = MemorySegmentFactory.wrap(serializedEvent.array());
 
-		final Buffer buffer = new NetworkBuffer(data, FreeingBufferRecycler.INSTANCE, false);
+		final Buffer buffer = new NetworkBuffer(data, FreeingBufferRecycler.INSTANCE, Buffer.DataType.getDataType(event));
 		buffer.setSize(serializedEvent.remaining());
 
 		return buffer;
@@ -283,7 +296,7 @@ public class EventSerializer {
 
 		MemorySegment data = MemorySegmentFactory.wrap(serializedEvent.array());
 
-		return new BufferConsumer(data, FreeingBufferRecycler.INSTANCE, false);
+		return new BufferConsumer(data, FreeingBufferRecycler.INSTANCE, Buffer.DataType.getDataType(event));
 	}
 
 	public static AbstractEvent fromBuffer(Buffer buffer, ClassLoader classLoader) throws IOException {

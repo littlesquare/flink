@@ -23,11 +23,11 @@ under the License.
 	<parent>
 		<groupId>org.apache.flink</groupId>
 		<artifactId>flink-table</artifactId>
-		<version>1.9-SNAPSHOT</version>
+		<version>1.11-SNAPSHOT</version>
 		<relativePath>..</relativePath>
 	</parent>
 
-	<artifactId>flink-table-runtime-blink</artifactId>
+	<artifactId>flink-table-runtime-blink_${scala.binary.version}</artifactId>
 	<name>flink-table-runtime-blink</name>
 	<description>
 		This module contains classes that are required by a task manager for
@@ -50,7 +50,26 @@ under the License.
 
 		<dependency>
 			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-api-java</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-table-api-java-bridge_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
 			<artifactId>flink-streaming-java_${scala.binary.version}</artifactId>
+			<version>${project.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-cep_${scala.binary.version}</artifactId>
 			<version>${project.version}</version>
 			<scope>provided</scope>
 		</dependency>
@@ -61,11 +80,53 @@ under the License.
 			<version>${janino.version}</version>
 		</dependency>
 
-		<!-- Lz4 compression library -->
 		<dependency>
-			<groupId>org.lz4</groupId>
-			<artifactId>lz4-java</artifactId>
-			<version>1.5.0</version>
+			<groupId>org.apache.calcite.avatica</groupId>
+			<artifactId>avatica-core</artifactId>
+			<!-- When updating the Calcite version, make sure to update the version and dependency exclusions -->
+			<version>1.16.0</version>
+			<exclusions>
+				<!--
+
+				Dependencies that are not needed for how we use Avatica right now.
+
+				We exclude all the dependencies of Avatica because currently we only use
+				TimeUnit, TimeUnitRange and SqlDateTimeUtils which only dependent JDK.
+
+				"mvn dependency:tree" as of Avatica 1.16:
+
+				[INFO] +- org.apache.calcite.avatica:avatica-core:jar:1.16.0:compile
+
+				-->
+				<exclusion>
+					<groupId>org.apache.calcite.avatica</groupId>
+					<artifactId>avatica-metrics</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.google.protobuf</groupId>
+					<artifactId>protobuf-java</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.httpcomponents</groupId>
+					<artifactId>httpclient</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.httpcomponents</groupId>
+					<artifactId>httpcore</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.fasterxml.jackson.core</groupId>
+					<artifactId>jackson-core</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.fasterxml.jackson.core</groupId>
+					<artifactId>jackson-annotations</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>com.fasterxml.jackson.core</groupId>
+					<artifactId>jackson-databind</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 
 		<!-- test dependencies -->
@@ -98,17 +159,12 @@ under the License.
 		<plugins>
 			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
-				<artifactId>maven-shade-plugin</artifactId>
+				<artifactId>maven-jar-plugin</artifactId>
 				<executions>
 					<execution>
-						<id>shade-flink</id>
-						<configuration>
-							<artifactSet>
-								<includes combine.children="append">
-									<include>org.lz4:lz4-java</include>
-								</includes>
-							</artifactSet>
-						</configuration>
+						<goals>
+							<goal>test-jar</goal>
+						</goals>
 					</execution>
 				</executions>
 			</plugin>

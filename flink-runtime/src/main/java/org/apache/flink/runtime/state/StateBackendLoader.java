@@ -20,10 +20,9 @@ package org.apache.flink.runtime.state;
 
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.HighAvailabilityOptions;
 import org.apache.flink.configuration.IllegalConfigurationException;
+import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.core.fs.Path;
-import org.apache.flink.runtime.jobmanager.HighAvailabilityMode;
 import org.apache.flink.runtime.state.filesystem.FsStateBackend;
 import org.apache.flink.runtime.state.filesystem.FsStateBackendFactory;
 import org.apache.flink.runtime.state.memory.MemoryStateBackend;
@@ -35,7 +34,6 @@ import org.slf4j.Logger;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
-import java.util.UUID;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -68,7 +66,7 @@ public class StateBackendLoader {
 	 * <p>The state backends can be specified either via their shortcut name, or via the class name
 	 * of a {@link StateBackendFactory}. If a StateBackendFactory class name is specified, the factory
 	 * is instantiated (via its zero-argument constructor) and its
-	 * {@link StateBackendFactory#createFromConfig(Configuration, ClassLoader)} method is called.
+	 * {@link StateBackendFactory#createFromConfig(ReadableConfig, ClassLoader)} method is called.
 	 *
 	 * <p>Recognized shortcut names are '{@value StateBackendLoader#MEMORY_STATE_BACKEND_NAME}',
 	 * '{@value StateBackendLoader#FS_STATE_BACKEND_NAME}', and
@@ -90,14 +88,14 @@ public class StateBackendLoader {
 	 *             May be thrown by the StateBackendFactory when instantiating the state backend
 	 */
 	public static StateBackend loadStateBackendFromConfig(
-			Configuration config,
+			ReadableConfig config,
 			ClassLoader classLoader,
 			@Nullable Logger logger) throws IllegalConfigurationException, DynamicCodeLoadingException, IOException {
 
 		checkNotNull(config, "config");
 		checkNotNull(classLoader, "classLoader");
 
-		final String backendName = config.getString(CheckpointingOptions.STATE_BACKEND);
+		final String backendName = config.get(CheckpointingOptions.STATE_BACKEND);
 		if (backendName == null) {
 			return null;
 		}
@@ -165,10 +163,10 @@ public class StateBackendLoader {
 	 * default state backend (the {@link MemoryStateBackend}). 
 	 *
 	 * <p>If an application-defined state backend is found, and the state backend is a
-	 * {@link ConfigurableStateBackend}, this methods calls {@link ConfigurableStateBackend#configure(Configuration, ClassLoader)}
+	 * {@link ConfigurableStateBackend}, this methods calls {@link ConfigurableStateBackend#configure(ReadableConfig, ClassLoader)}
 	 * on the state backend.
 	 *
-	 * <p>Refer to {@link #loadStateBackendFromConfig(Configuration, ClassLoader, Logger)} for details on
+	 * <p>Refer to {@link #loadStateBackendFromConfig(ReadableConfig, ClassLoader, Logger)} for details on
 	 * how the state backend is loaded from the configuration.
 	 *
 	 * @param config The configuration to load the state backend from
@@ -228,29 +226,6 @@ public class StateBackendLoader {
 				backend = new MemoryStateBackendFactory().createFromConfig(config, classLoader);
 				if (logger != null) {
 					logger.info("No state backend has been configured, using default (Memory / JobManager) {}", backend);
-				}
-			}
-		}
-
-		// to keep supporting the old behavior where default (JobManager) Backend + HA mode = checkpoints in HA store
-		// we add the HA persistence dir as the checkpoint directory if none other is set
-
-		if (backend instanceof MemoryStateBackend) {
-			final MemoryStateBackend memBackend = (MemoryStateBackend) backend;
-
-			if (memBackend.getCheckpointPath() == null && HighAvailabilityMode.isHighAvailabilityModeActivated(config)) {
-				final String haStoragePath = config.getString(HighAvailabilityOptions.HA_STORAGE_PATH);
-
-				if (haStoragePath != null) {
-					try {
-						Path checkpointDirPath = new Path(haStoragePath, UUID.randomUUID().toString());
-						if (checkpointDirPath.toUri().getScheme() == null) {
-							checkpointDirPath = checkpointDirPath.makeQualified(checkpointDirPath.getFileSystem());
-						}
-						Configuration tempConfig = new Configuration(config);
-						tempConfig.setString(CheckpointingOptions.CHECKPOINTS_DIRECTORY, checkpointDirPath.toString());
-						return memBackend.configure(tempConfig, classLoader);
-					} catch (Exception ignored) {}
 				}
 			}
 		}

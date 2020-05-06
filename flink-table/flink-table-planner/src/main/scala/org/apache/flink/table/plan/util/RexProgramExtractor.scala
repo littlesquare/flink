@@ -18,26 +18,28 @@
 
 package org.apache.flink.table.plan.util
 
-import java.sql.{Date, Time, Timestamp}
+import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, SqlTimeTypeInfo}
+import org.apache.flink.table.api.TableException
+import org.apache.flink.table.calcite.FlinkTypeFactory
+import org.apache.flink.table.catalog.{FunctionCatalog, UnresolvedIdentifier}
+import org.apache.flink.table.expressions.ApiExpressionUtils.unresolvedCall
+import org.apache.flink.table.expressions._
+import org.apache.flink.table.util.JavaScalaConversionUtil
+import org.apache.flink.util.Preconditions
 
 import org.apache.calcite.plan.RelOptUtil
 import org.apache.calcite.rex._
 import org.apache.calcite.sql.fun.SqlStdOperatorTable
 import org.apache.calcite.sql.{SqlFunction, SqlPostfixOperator}
 import org.apache.calcite.util.{DateString, TimeString, TimestampString}
-import org.apache.flink.api.common.typeinfo.{BasicTypeInfo, SqlTimeTypeInfo}
-import org.apache.flink.table.api.TableException
-import org.apache.flink.table.calcite.FlinkTypeFactory
-import org.apache.flink.table.expressions.ApiExpressionUtils.call
-import org.apache.flink.table.expressions._
-import org.apache.flink.table.validate.FunctionCatalog
-import org.apache.flink.util.Preconditions
 import org.slf4j.{Logger, LoggerFactory}
+
+import java.sql.{Date, Time, Timestamp}
 
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
 import scala.collection.mutable
-import scala.util.{Failure, Success, Try}
+import scala.util.Try
 
 object RexProgramExtractor {
 
@@ -152,7 +154,7 @@ class RexNodeToExpressionConverter(
 
   override def visitInputRef(inputRef: RexInputRef): Option[Expression] = {
     Preconditions.checkArgument(inputRef.getIndex < inputNames.length)
-    Some(ResolvedFieldReference(
+    Some(PlannerResolvedFieldReference(
       inputNames(inputRef.getIndex),
       FlinkTypeFactory.toTypeInfo(inputRef.getType)
     ))
@@ -276,16 +278,12 @@ class RexNodeToExpressionConverter(
   private def lookupFunction(name: String, operands: Seq[Expression]): Option[Expression] = {
     // TODO we assume only planner expression as a temporary solution to keep the old interfaces
     val expressionBridge = new ExpressionBridge[PlannerExpression](
-      functionCatalog, PlannerExpressionConverter.INSTANCE)
-    Try(functionCatalog.lookupFunction(name)) match {
-      case Success(f: FunctionDefinition) =>
-        try {
-          Some(expressionBridge.bridge(call(f, operands: _*)))
-        } catch {
-          case _: Exception => None
-        }
-      case Failure(_) => None
-    }
+      PlannerExpressionConverter.INSTANCE)
+    JavaScalaConversionUtil.toScala(functionCatalog.lookupFunction(UnresolvedIdentifier.of(name)))
+      .flatMap(result =>
+        Try(expressionBridge.bridge(
+          unresolvedCall(result.getFunctionDefinition, operands: _*))).toOption
+      )
   }
 
   private def replace(str: String): String = {

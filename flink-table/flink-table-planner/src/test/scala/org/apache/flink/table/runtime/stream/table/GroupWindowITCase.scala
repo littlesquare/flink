@@ -18,34 +18,31 @@
 
 package org.apache.flink.table.runtime.stream.table
 
-import java.math.BigDecimal
-
-import org.apache.flink.api.common.time.Time
 import org.apache.flink.api.scala._
 import org.apache.flink.streaming.api.TimeCharacteristic
 import org.apache.flink.streaming.api.functions.AssignerWithPunctuatedWatermarks
 import org.apache.flink.streaming.api.scala.StreamExecutionEnvironment
 import org.apache.flink.streaming.api.watermark.Watermark
 import org.apache.flink.table.api.scala._
-import org.apache.flink.table.api.{Session, Slide, StreamQueryConfig, Tumble}
+import org.apache.flink.table.api.{EnvironmentSettings, Session, Slide, Tumble}
 import org.apache.flink.table.functions.aggfunctions.CountAggFunction
 import org.apache.flink.table.runtime.stream.table.GroupWindowITCase._
 import org.apache.flink.table.runtime.utils.JavaUserDefinedAggFunctions.{CountDistinct, CountDistinctWithMerge, WeightedAvg, WeightedAvgWithMerge}
 import org.apache.flink.table.runtime.utils.StreamITCase
+import org.apache.flink.table.utils.CountMinMax
 import org.apache.flink.test.util.AbstractTestBase
 import org.apache.flink.types.Row
-import org.junit.Assert._
-import org.junit.Test
 
-import scala.collection.mutable
+import org.junit.Assert._
+import org.junit.{Before, Test}
+
+import java.math.BigDecimal
 
 /**
   * We only test some aggregations until better testing of constructed DataStream
   * programs is possible.
   */
 class GroupWindowITCase extends AbstractTestBase {
-  private val queryConfig = new StreamQueryConfig()
-  queryConfig.withIdleStateRetentionTime(Time.hours(1), Time.hours(2))
 
   val data = List(
     (1L, 1, "Hi"),
@@ -64,12 +61,17 @@ class GroupWindowITCase extends AbstractTestBase {
     (16L, 4, 4d, 4f, new BigDecimal("4"), "Hello world"),
     (32L, 4, 4d, 4f, new BigDecimal("4"), null.asInstanceOf[String]))
 
+  @Before
+  def setup(): Unit = {
+    StreamITCase.clear
+  }
+
   @Test
   def testProcessingTimeSlidingGroupWindowOverCount(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setParallelism(1)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env.fromCollection(data)
     val table = stream.toTable(tEnv, 'long, 'int, 'string, 'proctime.proctime)
@@ -85,7 +87,7 @@ class GroupWindowITCase extends AbstractTestBase {
         weightAvgFun('long, 'int), weightAvgFun('int, 'int),
         countDistinct('long))
 
-    val results = windowedTable.toAppendStream[Row](queryConfig)
+    val results = windowedTable.toAppendStream[Row]
     results.addSink(new StreamITCase.StringSink[Row])
     env.execute()
 
@@ -110,8 +112,8 @@ class GroupWindowITCase extends AbstractTestBase {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
     env.setParallelism(1)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val countFun = new CountAggFunction
     val weightAvgFun = new WeightedAvgWithMerge
@@ -141,8 +143,8 @@ class GroupWindowITCase extends AbstractTestBase {
   def testAllProcessingTimeTumblingGroupWindowOverCount(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setParallelism(1)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env.fromCollection(data)
     val table = stream.toTable(tEnv, 'long, 'int, 'string, 'proctime.proctime)
@@ -158,7 +160,7 @@ class GroupWindowITCase extends AbstractTestBase {
         countDistinct('long)
       )
 
-    val results = windowedTable.toAppendStream[Row](queryConfig)
+    val results = windowedTable.toAppendStream[Row]
     results.addSink(new StreamITCase.StringSink[Row])
     env.execute()
 
@@ -170,8 +172,8 @@ class GroupWindowITCase extends AbstractTestBase {
   def testEventTimeTumblingWindow(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data)
@@ -211,8 +213,8 @@ class GroupWindowITCase extends AbstractTestBase {
 
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setParallelism(1)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env.fromCollection(data)
     val table = stream.toTable(tEnv, 'long, 'int, 'string, 'int2, 'int3, 'proctime.proctime)
@@ -242,8 +244,8 @@ class GroupWindowITCase extends AbstractTestBase {
     // please keep this test in sync with the DataSet variant
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -281,8 +283,8 @@ class GroupWindowITCase extends AbstractTestBase {
     // please keep this test in sync with the DataSet variant
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -321,8 +323,8 @@ class GroupWindowITCase extends AbstractTestBase {
     // please keep this test in sync with the DataSet variant
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -358,8 +360,8 @@ class GroupWindowITCase extends AbstractTestBase {
     // please keep this test in sync with the DataSet variant
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -389,8 +391,8 @@ class GroupWindowITCase extends AbstractTestBase {
     // please keep this test in sync with the DataSet variant
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -418,8 +420,8 @@ class GroupWindowITCase extends AbstractTestBase {
   def testEventTimeGroupWindowWithoutExplicitTimeField(): Unit = {
     val env = StreamExecutionEnvironment.getExecutionEnvironment
     env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
-    val tEnv = StreamTableEnvironment.create(env)
-    StreamITCase.testResults = mutable.MutableList()
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
 
     val stream = env
       .fromCollection(data2)
@@ -442,6 +444,37 @@ class GroupWindowITCase extends AbstractTestBase {
       "null,1,1970-01-01 00:00:00.03,1970-01-01 00:00:00.033")
     assertEquals(expected.sorted, StreamITCase.testResults.sorted)
   }
+
+  @Test
+  def testRowbasedAggregateWithEventTimeTumblingWindow(): Unit = {
+    val env = StreamExecutionEnvironment.getExecutionEnvironment
+    env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime)
+    val settings = EnvironmentSettings.newInstance().useOldPlanner().build()
+    val tEnv = StreamTableEnvironment.create(env, settings)
+
+    val stream = env
+      .fromCollection(data)
+      .assignTimestampsAndWatermarks(new TimestampAndWatermarkWithOffset[(Long, Int, String)](0L))
+    val table = stream.toTable(tEnv, 'long, 'int, 'string, 'rowtime.rowtime)
+    val minMax = new CountMinMax
+
+    val windowedTable = table
+      .window(Tumble over 5.milli on 'rowtime as 'w)
+      .groupBy('w, 'string)
+      .aggregate(minMax('int) as ('x, 'y, 'z))
+      .select('string, 'x, 'y, 'z, 'w.start, 'w.end)
+
+    val results = windowedTable.toAppendStream[Row]
+    results.addSink(new StreamITCase.StringSink[Row])
+    env.execute()
+
+    val expected = Seq(
+      "Hello world,1,3,3,1970-01-01 00:00:00.005,1970-01-01 00:00:00.01",
+      "Hello world,1,3,3,1970-01-01 00:00:00.015,1970-01-01 00:00:00.02",
+      "Hello,2,2,2,1970-01-01 00:00:00.0,1970-01-01 00:00:00.005",
+      "Hi,1,1,1,1970-01-01 00:00:00.0,1970-01-01 00:00:00.005")
+    assertEquals(expected.sorted, StreamITCase.testResults.sorted)
+  }
 }
 
 object GroupWindowITCase {
@@ -458,7 +491,7 @@ object GroupWindowITCase {
     override def extractTimestamp(
         element: T,
         previousElementTimestamp: Long): Long = {
-      element.productElement(0).asInstanceOf[Long]
+      element.productElement(0).asInstanceOf[Number].longValue()
     }
   }
 }
